@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<title>OSM Maxspeed Colors</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #666; --line: #e3e3e3;
+    --track: #c9c9c9; --accent: #2563eb; --seg-bg: #f1f1f1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #202124; --fg: #e8eaed; --muted: #9aa0a6; --line: #3c4043; --track: #5f6368; --accent: #8ab4f8; --seg-bg: #2d2e31; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; width: 300px; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; }
+  header { padding: 12px 14px 8px; font-weight: 700; font-size: 14px; border-bottom: 1px solid var(--line); }
+  section { padding: 6px 14px; border-bottom: 1px solid var(--line); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 4px 0; }
+  .row label { flex: 1; cursor: pointer; }
+  .row.sub label { padding-left: 14px; color: var(--muted); }
+  .row.disabled, .types.disabled { opacity: .45; pointer-events: none; }
+
+  /* Kinds of extra signs (fold-out list with checkboxes) */
+  .types { margin: 0 0 4px 14px; }
+  .types summary { cursor: pointer; color: var(--muted); padding: 2px 0; }
+  /* minmax(0, …): otherwise a long name ("Time of day") makes a column wider than the popup */
+  #typeList { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 6px; }
+  .types label { display: flex; align-items: center; gap: 4px; padding: 2px 0; cursor: pointer; white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .types input { margin: 0; accent-color: var(--accent); }
+  .types .ico { width: 18px; text-align: center; }
+
+  /* On/off switch */
+  .sw { position: relative; width: 34px; height: 20px; flex: none; }
+  .sw input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+  .sw span { position: absolute; inset: 0; border-radius: 10px; background: var(--track); transition: background .15s; pointer-events: none; }
+  .sw span::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
+  .sw input:checked + span { background: var(--accent); }
+  .sw input:checked + span::after { transform: translateX(14px); }
+  .sw input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  select { width: 175px; font: inherit; color: inherit; background: var(--seg-bg); border: 1px solid var(--line); border-radius: 6px; padding: 3px 4px; }
+
+  /* Two-option toggle (km/h | mph, Deutsch | English) */
+  .seg { display: inline-flex; background: var(--seg-bg); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .seg label { padding: 3px 10px; cursor: pointer; color: var(--muted); }
+  .seg input:checked + label { background: var(--accent); color: var(--bg); font-weight: 600; }
+  .seg input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+  /* Note: road types without speed, drawn as a white dashed line on the map */
+  .nospeed { padding: 8px 14px; font-size: 12px; }
+  .ns-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  /* white dashes on a dark chip, otherwise invisible on the light popup */
+  .ns-line { flex: none; width: 26px; height: 10px; border-radius: 3px; background: #555 linear-gradient(90deg, #fff 0 5px, transparent 5px 9px) 0 50% / 9px 2px repeat-x; }
+  /* Two columns; the attribute value is only in the tooltip, the code names are too long for 300 px */
+  .nospeed ul { margin: 0; padding: 0 0 0 34px; list-style: none; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: 6px; }
+  .nospeed li { padding: 1px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
+
+  footer { padding: 8px 14px 12px; color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+<header>OSM Maxspeed Colors</header>
+
+<section>
+  <div class="row">
+    <label for="enabled" data-i18n="enabled"></label>
+    <span class="sw"><input type="checkbox" id="enabled"><span></span></span>
+  </div>
+  <div class="row sub" data-needs="enabled">
+    <label for="signs" data-i18n="signs"></label>
+    <span class="sw"><input type="checkbox" id="signs"><span></span></span>
+  </div>
+  <div class="row sub" data-needs="enabled signs">
+    <label for="extras" data-i18n="extras"></label>
+    <span class="sw"><input type="checkbox" id="extras"><span></span></span>
+  </div>
+  <details class="types" data-needs="enabled signs extras">
+    <summary data-i18n="types"></summary>
+    <div id="typeList"></div>
+  </details>
+  <div class="row sub" data-needs="enabled">
+    <label for="legend" data-i18n="legend"></label>
+    <span class="sw"><input type="checkbox" id="legend"><span></span></span>
+  </div>
+</section>
+
+<section>
+  <div class="row">
+    <label for="vehicle" data-i18n="vehicle"></label>
+    <select id="vehicle"></select>
+  </div>
+  <div class="row">
+    <span data-i18n="unit"></span>
+    <span class="seg">
+      <input type="radio" name="unit" id="unit-kmh" value="kmh"><label for="unit-kmh">km/h</label>
+      <input type="radio" name="unit" id="unit-mph" value="mph"><label for="unit-mph">mph</label>
+    </span>
+  </div>
+  <div class="row">
+    <span data-i18n="lang"></span>
+    <span class="seg">
+      <input type="radio" name="lang" id="lang-de" value="de"><label for="lang-de">Deutsch</label>
+      <input type="radio" name="lang" id="lang-en" value="en"><label for="lang-en">English</label>
+    </span>
+  </div>
+</section>
+
+<section class="nospeed">
+  <div class="ns-head"><span class="ns-line" aria-hidden="true"></span><span data-i18n="noSpeed"></span></div>
+  <ul id="noSpeedList"></ul>
+</section>
+
+<footer data-i18n="footer"></footer>
+
+<script src="settings.js"></script>
+<script src="popup.js"></script>
+</body>
+</html>

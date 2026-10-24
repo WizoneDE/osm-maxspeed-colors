@@ -1,0 +1,14 @@
+{
+  "extName": {
+    "message": "OSM Maxspeed Colors",
+    "description": "Name of the extension."
+  },
+  "extDescription": {
+    "message": "Colours roads in the OpenStreetMap iD editor by maxspeed. Adds signs, conditional, lane and direction limits.",
+    "description": "chrome://extensions description. Chrome allows at most 132 characters."
+  },
+  "extActionTitle": {
+    "message": "OSM Maxspeed Colors – settings",
+    "description": "Tooltip of the toolbar icon."
+  }
+}

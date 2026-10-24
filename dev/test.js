@@ -1,0 +1,149 @@
+// Tests for the tag reading and line styles in ../content.js: node dev/test.js
+const api = require('../content.js');
+api.setNoSpeedRules([['highway', 'footway'], ['highway', 'track'], ['highway', 'pedestrian'], ['service', 'parking_aisle']]);
+let fail = 0;
+const eq = (name, got, want) => { const a = JSON.stringify(got), b = JSON.stringify(want); if (a !== b) { fail++; console.log('FAIL', name, '\n   got ', a, '\n   want', b); } };
+const short = (d) => d && [d.status, Math.round(d.kmh * 10) / 10, d.advisory ? 'richt' : '', d.sign, d.lanes ? d.lanes.map((l) => Math.round(l.kmh)).join('|') : '', d.condition ? d.condition.kind : '', d.extras.map((e) => e.kmh + e.kind).join(',')].filter((x) => x !== '').join(' ');
+const W = (tags, veh = []) => { const r = api.waySpeed({ highway: 'primary', ...tags }, veh); return [r.forward ? short(r.forward) : '-', r.backward ? short(r.backward) : '-']; };
+
+// Werte
+eq('50', W({ maxspeed: '50' }), ['limit 50', 'limit 50']);
+eq('30 mph', W({ maxspeed: '30 mph' }), ['limit 48.3', 'limit 48.3']);
+eq('DE:urban', W({ maxspeed: 'DE:urban' }), ['limit 50', 'limit 50']);
+eq('DE:zone:30', W({ maxspeed: 'DE:zone:30' }), ['limit 30', 'limit 30']);
+eq('zone:maxspeed ohne maxspeed', W({ 'zone:maxspeed': 'DE:30' }), ['limit 30', 'limit 30']);
+eq('none → Richt 130', W({ highway: 'motorway', maxspeed: 'none' }), ['limit 130 richt', '-']);
+eq('none + advisory 120', W({ maxspeed: 'none', 'maxspeed:advisory': '120' }), ['limit 120 richt', 'limit 120 richt']);
+eq('DE:motorway → Richt', W({ highway: 'motorway', maxspeed: 'DE:motorway' }), ['limit 130 richt', '-']);
+eq('walk', W({ maxspeed: 'walk' }), ['limit 7 🚶', 'limit 7 🚶']);
+eq('living_street leer', W({ highway: 'living_street' }), ['limit 7 🚶', 'limit 7 🚶']);
+eq('signals', W({ maxspeed: 'signals' }), ['variable 0', 'variable 0']);
+eq('fehlt', W({}), ['missing 0', 'missing 0']);
+eq('Fußweg', W({ highway: 'footway' }), ['noSpeed 0', 'noSpeed 0']);
+eq('Fußweg mit maxspeed', W({ highway: 'footway', maxspeed: '10' }), ['limit 10', 'limit 10']);
+eq('Parkplatzgasse', W({ highway: 'service', service: 'parking_aisle' }), ['noSpeed 0', 'noSpeed 0']);
+eq('Gebäude', api.waySpeed({ building: 'yes' }, []).forward, null);
+// Richtungen und Einbahn
+eq('forward/backward', W({ 'maxspeed:forward': '70', 'maxspeed:backward': '100' }), ['limit 70', 'limit 100']);
+eq('maxspeed + forward', W({ maxspeed: '100', 'maxspeed:forward': '70' }), ['limit 70', 'limit 100']);
+eq('oneway=yes', W({ oneway: 'yes', maxspeed: '50' }), ['limit 50', '-']);
+eq('oneway=-1', W({ oneway: '-1', maxspeed: '50' }), ['-', 'limit 50']);
+// Fahrzeuge
+eq('hgv eigener Wert', W({ maxspeed: '100', 'maxspeed:hgv': '80' }, ['hgv']), ['limit 80', 'limit 80']);
+eq('hgv ohne eigenen Wert → maxspeed', W({ maxspeed: '100' }, ['hgv']), ['limit 100', 'limit 100']);
+eq('hgv:forward', W({ maxspeed: '100', 'maxspeed:hgv': '80', 'maxspeed:hgv:forward': '60' }, ['hgv']), ['limit 60', 'limit 80']);
+eq('bus über coach', W({ maxspeed: '100', 'maxspeed:coach': '80' }, ['bus', 'coach']), ['limit 80', 'limit 80']);
+eq('PKW ignoriert hgv', W({ maxspeed: '100', 'maxspeed:hgv': '80' }), ['limit 100', 'limit 100']);
+// Bedingungen
+eq('conditional wet + Zeit', W({ maxspeed: '120', 'maxspeed:conditional': '80 @ wet; 60 @ (Mo-Fr 07:00-17:00; Sa 08:00-12:00)' }), ['limit 120 80wet,60time', 'limit 120 80wet,60time']);
+eq('conditional sunset', W({ maxspeed: '100', 'maxspeed:conditional': '70 @ (sunset-sunrise)' }), ['limit 100 70daytime', 'limit 100 70daytime']);
+eq('conditional Gewicht', W({ maxspeed: '100', 'maxspeed:conditional': '60 @ (weight>7.5)' }), ['limit 100 60vehicle', 'limit 100 60vehicle']);
+eq('nur conditional', W({ 'maxspeed:conditional': '30 @ (Mo-Fr 07:00-18:00)' }), ['limit 30 time', 'limit 30 time']);
+eq('forward:conditional', W({ maxspeed: '100', 'maxspeed:forward:conditional': '80 @ wet' }), ['limit 100 80wet', 'limit 100']);
+eq('hgv:conditional', W({ maxspeed: '100', 'maxspeed:hgv:conditional': '60 @ wet' }, ['hgv']), ['limit 100 60wet', 'limit 100 60wet']);
+eq('kaputt conditional', W({ maxspeed: '100', 'maxspeed:conditional': 'quatsch; @ ; x @ wet' }), ['limit 100', 'limit 100']);
+// Spuren
+eq('lanes oneway', W({ oneway: 'yes', 'maxspeed:lanes': '100|80|60' }), ['limit 60 100|80|60', '-']);
+eq('lanes oneway + maxspeed', W({ oneway: 'yes', maxspeed: '100', 'maxspeed:lanes': '100|100|80' }), ['limit 100 100|100|80', '-']);
+eq('lanes gleich → keine', W({ oneway: 'yes', 'maxspeed:lanes': '80|80' }), ['missing 0', '-']);
+eq('lanes forward/backward', W({ maxspeed: '100', 'maxspeed:lanes:forward': '100|80', 'maxspeed:lanes:backward': '100|60' }), ['limit 100 100|80', 'limit 100 100|60']);
+eq('lanes auf Zweirichtung ohne :forward ignoriert', W({ maxspeed: '100', 'maxspeed:lanes': '100|80|80|100' }), ['limit 100', 'limit 100']);
+eq('lanes mit none', W({ highway: 'motorway', 'maxspeed:lanes': 'none|120' }), ['limit 120 130|120', '-']);
+// Sonstiges
+eq('Zufahrt beschränkt', api.waySpeed({ highway: 'service', access: 'private' }, []).restricted, true);
+eq('Kreisverkehr einbahn', api.onewayOf({ highway: 'primary', junction: 'roundabout' }), 1);
+eq('Autobahn oneway=no', api.onewayOf({ highway: 'motorway', oneway: 'no' }), 0);
+eq('Unsinn-Werte', [api.parseSpeed('-5'), api.parseSpeed('9999'), api.parseSpeed(42), api.parseSpeed('fast')], [null, null, null, null]);
+
+// Linienstil: Streifen als [von, bis, Farbe, Muster, Untergrund], Breite in Anteilen -0.5 … 0.5
+const r3 = (n) => Math.round(n * 1000) / 1000;
+const S = (tags, veh = []) => {
+  const s = api.lineStyleFor({ highway: 'primary', ...tags }, veh);
+  return s && { stripes: s.stripes.map((p) => [r3(p.from), r3(p.to), p.look.color, p.look.dash, p.look.under]), overlay: s.overlay, signs: s.signs.map((x) => x.side), width: s.width, outline: s.outline };
+};
+const G100 = '#1b5e20', B80 = '#42a5f5', N60 = '#0d1b6e', O50 = '#ffb74d';
+eq('Stil gleich', S({ maxspeed: '50' }), { stripes: [[-0.5, 0.5, O50, '', '']], overlay: false, signs: [0], width: '', outline: '' });
+eq('Stil je Richtung', S({ 'maxspeed:forward': '100', 'maxspeed:backward': '50' }).stripes, [[0, 0.5, G100, '', ''], [-0.5, 0, O50, '', '']]);
+eq('Stil je Richtung Schilder', S({ 'maxspeed:forward': '100', 'maxspeed:backward': '50' }).signs, [1, -1]);
+eq('Spuren oneway=yes: Spur 1 links', S({ oneway: 'yes', 'maxspeed:lanes': '100|80|60' }).stripes,
+  [[-0.5, -0.167, G100, '', ''], [-0.167, 0.167, B80, '', ''], [0.167, 0.5, N60, '', '']]);
+eq('Spuren oneway=-1: gespiegelt', S({ oneway: '-1', 'maxspeed:lanes': '100|80|60' }).stripes,
+  [[0.167, 0.5, G100, '', ''], [-0.167, 0.167, B80, '', ''], [-0.5, -0.167, N60, '', '']]);
+eq('Spuren Zweirichtung: Spur 1 zur Mitte', S({ maxspeed: '100', 'maxspeed:lanes:forward': '100|80', 'maxspeed:lanes:backward': '100|60' }).stripes,
+  [[0, 0.25, G100, '', ''], [0.25, 0.5, B80, '', ''], [-0.25, 0, G100, '', ''], [-0.5, -0.25, N60, '', '']]);
+eq('Spuren nur forward → trotzdem geteilt', S({ maxspeed: '100', 'maxspeed:lanes:forward': '100|80' }).stripes,
+  [[0, 0.25, G100, '', ''], [0.25, 0.5, B80, '', ''], [-0.5, 0, G100, '', '']]);
+eq('fehlt', S({}).stripes, [[-0.5, 0.5, '#e53935', '6,5', '#ffffff']]);
+eq('fehlt, beschränkt', S({ access: 'private' }).stripes, [[-0.5, 0.5, '#e53935', '6,5', '#9e9e9e']]);
+eq('Richtgeschwindigkeit', S({ highway: 'motorway', maxspeed: 'none' }), { stripes: [[-0.5, 0.5, '#ffff00', 'dots', '#7b1fa2']], overlay: true, signs: [0], width: '', outline: '' });
+eq('nur bedingt', S({ 'maxspeed:conditional': '30 @ wet' }).stripes, [[-0.5, 0.5, '#ff7961', '12,5', '']]);
+eq('variabel', S({ maxspeed: 'signals' }).stripes, [[-0.5, 0.5, '#ffffff', '3,3', '#546e7a']]);
+eq('Fußweg', S({ highway: 'footway' }), { stripes: [[-0.5, 0.5, '#ffffff', '5,4', '']], overlay: false, signs: [0], width: '2px', outline: 'none' });
+eq('kein Weg', api.lineStyleFor({ building: 'yes' }, []), null);
+// Schilder und Tooltips
+const D = (tags) => api.waySpeed({ highway: 'primary', ...tags }, []).forward;
+eq('Schild Spuren', api.signLabel(D({ oneway: 'yes', 'maxspeed:lanes': '100|80|60' })), '100|80|60');
+eq('Schild walk', api.signLabel(D({ maxspeed: 'walk' })), '🚶');
+eq('Tooltip implizit', api.signTooltip(D({ maxspeed: 'DE:urban' })), '50 km/h – implizit\nmaxspeed=DE:urban');
+eq('Tooltip Bedingung', api.signTooltip(D({ 'maxspeed:conditional': '30 @ (Mo-Fr 07:00-17:00)' })), '30 km/h – Mo-Fr 07:00-17:00\nmaxspeed:conditional=30 @ (Mo-Fr 07:00-17:00)');
+eq('Tooltip Nässe', api.signTooltip(D({ 'maxspeed:conditional': '30 @ wet' })), '30 km/h – bei Nässe\nwet\nmaxspeed:conditional=30 @ wet');
+const SYM = (tags) => D(tags).symbol;
+// Wechselverkehrszeichen
+const V = (tags) => { const d = D(tags); return [d.status, Math.round(d.kmh), d.variable]; };
+eq('variable mit maxspeed', V({ maxspeed: '120', 'maxspeed:variable': 'yes' }), ['limit', 120, true]);
+eq('variable Grund', V({ maxspeed: '100', 'maxspeed:variable': 'weather' }), ['limit', 100, true]);
+eq('variable=no', V({ maxspeed: '100', 'maxspeed:variable': 'no' }), ['limit', 100, false]);
+eq('variable ohne maxspeed', V({ 'maxspeed:variable': 'yes' }), ['variable', 0, true]);
+eq('signals (veraltet)', V({ maxspeed: 'signals' }), ['variable', 0, true]);
+eq('variable Stil = normales Limit', S({ maxspeed: '100', 'maxspeed:variable': 'yes' }).stripes, [[-0.5, 0.5, G100, '', '']]);
+eq('variable Tooltip', api.signTooltip(D({ maxspeed: '120', 'maxspeed:variable': 'yes' })), '120 km/h\nmaxspeed=120\nmaxspeed:variable=yes');
+eq('variable Gründe', D({ maxspeed: '120', 'maxspeed:variable': 'weather;peak_traffic' }).variableReasons, ['weather', 'peak_traffic']);
+eq('variable Tafeln', api.variablePanels(D({ maxspeed: '120', 'maxspeed:variable': 'weather;school_zone;foo' })).map((p) => p.art || p.lines.join()), ['Wetter', '1012-50', 'foo']);
+eq('variable yes ohne Tafel', api.variablePanels(D({ maxspeed: '120', 'maxspeed:variable': 'yes' })), []);
+eq('variable:forward', [D({ maxspeed: '120', 'maxspeed:variable:forward': 'weather' }).variable, api.waySpeed({ highway: 'primary', maxspeed: '120', 'maxspeed:variable:forward': 'weather' }, []).backward.variable], [true, false]);
+const NV = api.waySpeed({ highway: 'motorway', maxspeed: 'none', 'maxspeed:variable': 'yes' }, []).forward;
+eq('none + variable: Richt 130, ohne Limit', [NV.status, NV.kmh, NV.advisory, NV.unlimited, NV.variable], ['limit', 130, true, true, true]);
+eq('variable keine 274.1', SYM({ maxspeed: 'DE:zone30', 'maxspeed:variable': 'yes' }), '');
+eq('Zeichen 325.1', [SYM({ highway: 'living_street' }), SYM({ highway: 'living_street', maxspeed: 'walk' }), SYM({ highway: 'living_street', maxspeed: '20' }), SYM({ highway: 'residential', maxspeed: 'walk' })], ['325.1', '325.1', '', '']);
+eq('Tooltip 325.1', api.signTooltip(D({ highway: 'living_street' })), 'Verkehrsberuhigter Bereich (Zeichen 325.1): Schrittgeschwindigkeit – implizit\nhighway=living_street');
+eq('Zeichen 244.1', [SYM({ highway: 'residential', bicycle_road: 'yes' }), SYM({ highway: 'residential', cyclestreet: 'yes', maxspeed: '30' }), SYM({ highway: 'residential', bicycle_road: 'yes', maxspeed: '20' })], ['244.1', '244.1', '']);
+eq('Fahrradstraße ohne maxspeed → 30', short(D({ highway: 'residential', bicycle_road: 'yes' })), 'limit 30');
+eq('Zeichen 274.1', [SYM({ maxspeed: 'DE:zone30' }), SYM({ maxspeed: 'DE:zone:30' }), SYM({ maxspeed: '30', 'zone:maxspeed': 'DE:30' }), SYM({ 'zone:maxspeed': 'DE:30' }), SYM({ maxspeed: 'DE:zone20' }), SYM({ maxspeed: '50', 'zone:maxspeed': 'DE:30' }), SYM({ maxspeed: '30', 'maxspeed:type': 'DE:urban' })],
+  ['274.1', '274.1', '274.1', '274.1', '274.1-20', '', '']);
+eq('Zeichen 242.1', [api.waySpeed({ highway: 'pedestrian' }, []).forward.symbol, api.signTooltip(api.waySpeed({ highway: 'pedestrian' }, []).forward)], ['242.1', 'Fußgängerzone (Zeichen 242.1)\nhighway=pedestrian']);
+// Zusatzzeichen
+const P = (raw) => api.conditionPanels({ raw, icon: '', label: '', kind: '' }).map((p) => p.art || p.lines.join(' / '));
+eq('Zusatz Nässe', P('wet'), ['1053-35']);
+eq('Zusatz Schnee', P('snow'), ['snow']);
+eq('Zusatz Nebel', P('fog'), ['bei Nebel']);
+eq('Zusatz Zeit', P('Mo-Fr 07:00-17:00'), ['Mo–Fr / 7–17 h']);
+eq('Zusatz Zeiten', P('Mo-Fr 07:30-09:00,16:00-18:00'), ['Mo–Fr / 7.30–9, 16–18 h']);
+eq('Zusatz mehrere Regeln', P('Mo-Fr 07:00-17:00; Sa 08:00-12:00'), ['Mo–Fr / 7–17 h / Sa / 8–12 h']);
+eq('Zusatz nur Zeit', P('22:00-06:00'), ['22–6 h']);
+eq('Zusatz Tage', P('Sa,Su,PH'), ['Sa, So / an Feiertagen']);
+eq('Zusatz Ferien', P('SH'), ['in den Ferien']);
+eq('Zusatz nachts', P('sunset-sunrise'), ['nachts']);
+eq('Zusatz Monate', P('Nov-Mar'), ['Nov–Mär']);
+eq('Zusatz 7,5 t', P('weight>7.5'), ['1053-33']);
+eq('Zusatz 12 t', P('weight>12'), ['12 t']);
+eq('Zusatz Lkw + Gewicht', P('weight>3.5 AND hgv'), ['3,5 t', '1010-51']);
+eq('Zusatz Anhänger', P('trailer'), ['1010-59']);
+eq('Zusatz unbekannt', P('Mo-Fr 07:00-17:00 "Schule"'), ['Mo-Fr 07:00-17:00…']);
+eq('Zusatz Fahrzeug unter Hauptschild', api.mainPanels(api.waySpeed({ highway: 'primary', maxspeed: '100', 'maxspeed:hgv': '80' }, ['hgv']).forward).map((p) => p.art), ['1010-51']);
+eq('Zusatz nur bedingt unter Hauptschild', api.mainPanels(D({ 'maxspeed:conditional': '30 @ (Mo-Fr 07:00-17:00)' })).map((p) => p.lines.join(' / ')), ['Mo–Fr / 7–17 h']);
+api.setDisplay({ unit: 'mph', lang: 'en' });
+eq('mph Schild', api.signLabel(D({ maxspeed: '30 mph' })), '30');
+eq('mph Band', api.bandFor(D({ maxspeed: '30 mph' }).kmh).color, '#c6ff00'); // Band 26–30
+eq('Tooltip Richtgeschw. en', api.signTooltip(D({ maxspeed: 'none' })), '81 mph – advisory speed\nmaxspeed=none');
+api.setDisplay({ unit: 'kmh', lang: 'de' });
+eq('Bandtext', [api.bandLabel(api.colorBands()[0]), api.bandLabel(api.colorBands()[2]), api.bandLabel(api.colorBands()[12])], ['≤ 5', '30–39', '≥ 130']);
+// Einstellungen aus der Nachricht
+eq('Einstellungen kaputt', api.checkSettings({ enabled: 'ja', vehicle: '<b>', unit: 'x', hiddenExtras: [1, 'wet'] }),
+  { enabled: true, signs: true, extras: true, legend: true, hiddenExtras: ['wet'], vehicle: 'car', unit: 'kmh', lang: 'de' });
+api.setVehicles([['car', [], '🚗', 'PKW', 'Car'], ['hgv', ['hgv'], '🚛', 'LKW', 'Truck'], ['bad', ['x y'], '', '', ''], 'quatsch']);
+eq('Fahrzeuge geprüft', [api.suffixesFor('hgv'), api.suffixesFor('bad'), api.suffixesFor('car')], [['hgv'], [], []]);
+api.setVehicles('quatsch');
+eq('Fahrzeuge bleiben', api.suffixesFor('hgv'), ['hgv']);
+
+console.log(fail ? `${fail} Tests fehlgeschlagen` : 'Alle Tests bestanden');
+process.exitCode = fail ? 1 : 0;

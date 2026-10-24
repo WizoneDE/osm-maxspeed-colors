@@ -1,0 +1,2035 @@
+// @ts-check
+/**
+ * OSM Maxspeed Colors – map script (runs in the page's own "MAIN" world).
+ *
+ * WHAT IT DOES
+ *   Colours every road in the OpenStreetMap editor iD by its speed limit, draws
+ *   speed-limit signs on the roads and shows a small legend. Roads with different
+ *   limits per direction are drawn as two halves, roads with limits per lane as
+ *   one stripe per lane. Ways that normally have no speed limit (footways,
+ *   stairs …) become a thin white dashed line.
+ *
+ * WHERE THE DATA COMES FROM
+ *   iD attaches each way's data to its SVG <path> element (d3 data binding),
+ *   readable as `path.__data__`, including the OSM tags. Only scripts in the page's
+ *   own world can see that property, which is why this script runs with
+ *   `world: "MAIN"`. Nothing is loaded from the network.
+ *
+ *   On openstreetmap.org iD runs in an iframe at /id (the page /edit embeds it).
+ *   The script only starts on those paths, once iD's map layer exists.
+ *
+ * SETTINGS
+ *   The toolbar popup stores the settings in chrome.storage. This script cannot
+ *   read chrome.storage from the page world, so bridge.js forwards them with
+ *   window.postMessage, together with the tables from settings.js (ways without a
+ *   speed limit, kinds of extra signs, vehicle types).
+ *
+ *   This file must not use anything defined in settings.js directly: Chrome does
+ *   not share top-level variables between scripts injected into the page world,
+ *   so such a reference fails at runtime. Everything it needs from settings.js
+ *   arrives in the settings message and is type-checked here.
+ */
+(() => {
+  'use strict';
+
+  // ===========================================================================
+  // Types (JSDoc, checked with `tsc --checkJs`)
+  // ===========================================================================
+
+  /** @typedef {Record<string, string>} Tags  OSM tags of a way, e.g. { highway: "primary" }. */
+
+  /**
+   * Human-readable meaning of a condition (maxspeed:conditional).
+   * @typedef {object} Condition
+   * @property {string} icon   Emoji shown on the extra sign, e.g. 💧.
+   * @property {string} label  Text for the tooltip, e.g. "bei Nässe".
+   * @property {string} raw    The original condition, e.g. "Mo-Fr 07:00-17:00".
+   * @property {string} kind   Key from OMC_EXTRA_TYPES, used by the popup filter.
+   */
+
+  /** @typedef {Condition & { kmh: number }} ExtraLimit  A conditional limit shown as a small extra sign. */
+
+  // ===========================================================================
+  // Language and unit
+  // ===========================================================================
+  // Set from the popup settings. Values are always converted to km/h; mph is only
+  // used for display.
+
+  /** @type {'de'|'en'} */ let LANG = 'de';
+  /** @type {'kmh'|'mph'} */ let UNIT = 'kmh';
+  const KMH_PER_MPH = 1.609344;
+
+  /** Speed as shown to the user, in the selected unit. @param {number} kmh */
+  const shown = (kmh) => Math.round(UNIT === 'mph' ? kmh / KMH_PER_MPH : kmh);
+  const unitLabel = () => (UNIT === 'mph' ? 'mph' : 'km/h');
+
+  /** @param {{ lang?: string, unit?: string }} settings */
+  function setDisplay(settings) {
+    LANG = settings.lang === 'en' ? 'en' : 'de';
+    UNIT = settings.unit === 'mph' ? 'mph' : 'kmh';
+  }
+
+  /** Vehicle keys and OSM suffixes are plain words such as "hgv" or "car". */
+  const VEHICLE_KEY = /^[a-z_]{1,30}$/;
+
+  /**
+   * Checks settings that arrive by window.postMessage. bridge.js already cleans them
+   * with omcCleanSettings (settings.js), but any script on the page could send a
+   * message of the same shape, so the types are checked again here. Wrong values
+   * fall back to the defaults. (settings.js itself is not reachable from here, see
+   * the note at the top of this file.)
+   * @param {unknown} input
+   * @returns {Settings}
+   */
+  function checkSettings(input) {
+    /** @type {Record<string, unknown>} */
+    const s = input && typeof input === 'object' ? /** @type {Record<string, unknown>} */ (input) : {};
+    /** @param {string} key */
+    const isOn = (key) => (typeof s[key] === 'boolean' ? /** @type {boolean} */ (s[key]) : true);
+    return {
+      enabled: isOn('enabled'),
+      signs: isOn('signs'),
+      extras: isOn('extras'),
+      legend: isOn('legend'),
+      hiddenExtras: Array.isArray(s.hiddenExtras) ? s.hiddenExtras.filter((k) => typeof k === 'string').slice(0, 50) : [],
+      vehicle: typeof s.vehicle === 'string' && VEHICLE_KEY.test(s.vehicle) ? s.vehicle : 'car',
+      unit: s.unit === 'mph' ? 'mph' : 'kmh',
+      lang: s.lang === 'en' ? 'en' : 'de',
+    };
+  }
+
+  // Ways that normally carry no speed limit, as [tag, value] pairs.
+  // The list lives in settings.js (OMC_NO_SPEED) and arrives with the settings.
+  /** @type {Array<[string, string]>} */
+  let noSpeedRules = [];
+
+  /**
+   * Accepts a new "no speed" list. Only [string, string, …] entries are kept,
+   * because the message could also come from another script on the page.
+   * @param {unknown} list
+   */
+  function setNoSpeedRules(list) {
+    if (!Array.isArray(list)) return;
+    noSpeedRules = list
+      .filter((e) => Array.isArray(e) && typeof e[0] === 'string' && typeof e[1] === 'string')
+      .slice(0, 100)
+      .map((e) => [e[0], e[1]]);
+  }
+
+  // Kinds of extra signs for the legend: [key, icon, short German, short English].
+  // From OMC_EXTRA_TYPES in settings.js, also delivered with the settings message.
+  /** @type {Array<[string, string, string, string]>} */
+  let extraTypes = [];
+
+  /** Accepts the list of extra-sign kinds; only string entries are kept. @param {unknown} list */
+  function setExtraTypes(list) {
+    if (!Array.isArray(list)) return;
+    extraTypes = list
+      .filter((e) => Array.isArray(e) && e.length >= 4 && e.slice(0, 4).every((v) => typeof v === 'string'))
+      .slice(0, 50)
+      .map((e) => [e[0], e[1], e[2], e[3]]);
+  }
+
+  /**
+   * Vehicle types: [key, OSM suffixes tried in order, icon, German, English].
+   * From OMC_VEHICLES in settings.js; until the first message only cars are known.
+   * @typedef {[string, string[], string, string, string]} Vehicle
+   */
+  /** @type {Vehicle[]} */
+  let vehicles = [['car', [], '🚗', 'PKW', 'Car']];
+
+  /** Accepts the vehicle list; entries of the wrong shape are dropped. @param {unknown} list */
+  function setVehicles(list) {
+    if (!Array.isArray(list)) return;
+    /** @type {Vehicle[]} */
+    const valid = [];
+    for (const e of list.slice(0, 20)) {
+      if (!Array.isArray(e) || e.length < 5) continue;
+      const [key, suffixes, icon, de, en] = e;
+      if (typeof key !== 'string' || !VEHICLE_KEY.test(key)) continue;
+      if (!Array.isArray(suffixes) || !suffixes.every((v) => typeof v === 'string' && VEHICLE_KEY.test(v))) continue;
+      if (![icon, de, en].every((v) => typeof v === 'string')) continue;
+      valid.push([key, suffixes.slice(0, 5), String(icon).slice(0, 8), String(de).slice(0, 60), String(en).slice(0, 60)]);
+    }
+    if (valid.length) vehicles = valid;
+  }
+
+  /** OSM suffixes for a vehicle key, e.g. "hgv" → ["hgv"]; [] (plain maxspeed) if unknown. @param {string} key */
+  const suffixesFor = (key) => vehicles.find(([k]) => k === key)?.[1] ?? [];
+
+  const TEXT = {
+    de: {
+      drag: 'Ziehen zum Verschieben',
+      expand: 'Legende aufklappen',
+      collapse: 'Legende einklappen',
+      advisoryOnly: 'Richtgeschwindigkeit (none, :advisory)',
+      conditionalOnly: 'nur bedingt (:conditional)',
+      lanes: 'je Spur (:lanes), Spur 1 links',
+      split: 'je Richtung: rechts = Zeichenrichtung',
+      variable: 'variabel ohne maxspeed (:variable, signals)',
+      variableExtra: (/** @type {string} */ max) => `Wechselverkehrszeichen, höchstens ${max}`,
+      variableExtraNone: 'Wechselverkehrszeichen, sonst ohne Limit (Zeichen 282)',
+      variableExtraLegend: 'Wechselverkehrszeichen',
+      missing: 'fehlt (Fahrzeug)',
+      missingRestricted: 'fehlt, Zufahrt beschränkt (access)',
+      noSpeed: 'Fußweg u. ä. ohne maxspeed',
+      advisory: 'Richtgeschwindigkeit',
+      implicit: 'implizit',
+      walk: 'Schrittgeschwindigkeit',
+      symbols: {
+        '325.1': 'Verkehrsberuhigter Bereich (Zeichen 325.1)',
+        '242.1': 'Fußgängerzone (Zeichen 242.1)',
+        '244.1': 'Fahrradstraße (Zeichen 244.1)',
+        '274.1': 'Tempo-30-Zone (Zeichen 274.1)',
+        '274.1-20': 'Tempo-20-Zone (Zeichen 274.1-20)',
+      },
+      variableSign: 'variabel (Wechselverkehrszeichen)',
+      hint: 'Maus über ein Schild zeigt Tag und Bedingung.',
+      legendTitle: 'Speed Restriction – Legende',
+      vehicleHeading: 'Fahrzeug',
+      unitHeading: 'Einheit',
+      speedsHeading: 'Geschwindigkeiten',
+      distinctionsHeading: 'Abgrenzungen',
+      extrasHeading: 'Zusatzschilder',
+    },
+    en: {
+      drag: 'Drag to move',
+      expand: 'Expand legend',
+      collapse: 'Collapse legend',
+      advisoryOnly: 'advisory speed (none, :advisory)',
+      conditionalOnly: 'conditional only (:conditional)',
+      lanes: 'per lane (:lanes), lane 1 left',
+      split: 'per direction: right = drawing direction',
+      variable: 'variable without maxspeed (:variable, signals)',
+      variableExtra: (/** @type {string} */ max) => `Electronic signs, at most ${max}`,
+      variableExtraNone: 'Electronic signs, otherwise no limit (German sign 282)',
+      variableExtraLegend: 'Electronic signs',
+      missing: 'missing (vehicle)',
+      missingRestricted: 'missing, restricted access (access)',
+      noSpeed: 'footway etc. without maxspeed',
+      advisory: 'advisory speed',
+      implicit: 'implicit',
+      walk: 'walking pace',
+      symbols: {
+        '325.1': 'Living street (German sign 325.1)',
+        '242.1': 'Pedestrian zone (German sign 242.1)',
+        '244.1': 'Bicycle road (German sign 244.1)',
+        '274.1': '30 zone (German sign 274.1)',
+        '274.1-20': '20 zone (German sign 274.1-20)',
+      },
+      variableSign: 'variable (electronic signs)',
+      hint: 'Hover over a sign to see its tag and condition.',
+      legendTitle: 'Speed Restriction – Legend',
+      vehicleHeading: 'Vehicle',
+      unitHeading: 'Unit',
+      speedsHeading: 'Speeds',
+      distinctionsHeading: 'Distinctions',
+      extrasHeading: 'Extra signs',
+    },
+  };
+  /** Texts in the current language. */
+  const text = () => TEXT[LANG];
+
+  // ===========================================================================
+  // Reading OSM speed tags
+  // ===========================================================================
+  // Everything comes straight from the way's tags in iD; nothing is loaded.
+  //
+  //   maxspeed=50                     limit for everybody
+  //   maxspeed:forward / :backward    per direction (forward = drawing direction)
+  //   maxspeed:hgv=60                 per vehicle type (see OMC_VEHICLES)
+  //   maxspeed:hgv:forward=60         per vehicle type and direction
+  //   maxspeed:lanes=100|80|60        per lane, left to right in driving direction
+  //   maxspeed:lanes:forward=…        per lane and direction
+  //   maxspeed:conditional=80 @ wet; 30 @ (Mo-Fr 07:00-17:00)
+  //   maxspeed:advisory=130           recommended speed
+  //   maxspeed=none                   no limit (German motorways: advisory 130)
+  //   maxspeed=DE:urban, zone:maxspeed=DE:30 …   implicit limits by type of area
+
+  /** @typedef {'forward' | 'backward'} Direction */
+
+  /**
+   * One speed value as written in OSM.
+   * @typedef {object} SpeedValue
+   * @property {'limit'|'none'|'walk'|'variable'} kind
+   * @property {number} kmh            Converted to km/h (0 for none/variable).
+   * @property {boolean} implicit      Came from a code like "DE:urban" instead of a number.
+   * @property {string} raw            The original text.
+   */
+
+  /** Implicit limits "CC:type"; DEFAULT unless the country is listed. Values in km/h. */
+  const IMPLICIT = {
+    urban: { DEFAULT: 50 },
+    rural: { DEFAULT: 100, AT: 100, CH: 80, FR: 80, DK: 80, NL: 80, BE: 90, IT: 90, ES: 90, GB: 96.56 },
+    motorway: { DEFAULT: 130, DE: Infinity, CH: 120, NL: 100, GB: 112.65 },
+    trunk: { DEFAULT: 100, DE: Infinity, CH: 100 },
+    living_street: { DEFAULT: 7 },
+    pedestrian_zone: { DEFAULT: 7 },
+    bicycle_road: { DEFAULT: 30 },
+    walk: { DEFAULT: 7 },
+  };
+
+  const KMH_PER_KNOT = 1.852;
+
+  /**
+   * Parses one OSM speed value. Returns null for anything unreadable.
+   * @param {unknown} value
+   * @returns {SpeedValue | null}
+   */
+  function parseSpeed(value) {
+    if (typeof value !== 'string') return null;
+    const raw = value.trim().slice(0, 50);
+    const lower = raw.toLowerCase();
+    if (lower === 'none') return { kind: 'none', kmh: 0, implicit: false, raw };
+    if (lower === 'walk') return { kind: 'walk', kmh: 7, implicit: false, raw };
+    if (lower === 'signals' || lower === 'variable') return { kind: 'variable', kmh: 0, implicit: false, raw };
+
+    let m = lower.match(/^(\d+(?:\.\d+)?)\s*(mph|knots|km\/h|kmh)?$/);
+    if (m) {
+      const n = Number(m[1]);
+      const kmh = m[2] === 'mph' ? n * KMH_PER_MPH : m[2] === 'knots' ? n * KMH_PER_KNOT : n;
+      return kmh > 0 && kmh <= 500 ? { kind: 'limit', kmh, implicit: false, raw } : null;
+    }
+    // DE:zone30, DE:zone:30, DE:30 (zone:maxspeed)
+    m = raw.match(/^([A-Za-z]{2})(?:-[A-Za-z0-9]+)?:(?:zone:?)?(\d{1,3})$/i);
+    if (m) return { kind: 'limit', kmh: Number(m[2]), implicit: true, raw };
+    // DE:urban, FR:rural, DE:motorway …
+    m = raw.match(/^([A-Za-z]{2})(?:-[A-Za-z0-9]+)?:([a-z_]+)$/i);
+    if (m) {
+      const table = IMPLICIT[/** @type {keyof typeof IMPLICIT} */ (m[2].toLowerCase())];
+      if (!table) return null;
+      const country = m[1].toUpperCase();
+      const kmh = country in table ? table[/** @type {'DEFAULT'} */ (country)] : table.DEFAULT;
+      if (kmh === Infinity) return { kind: 'none', kmh: 0, implicit: true, raw };
+      return { kind: kmh <= 7 ? 'walk' : 'limit', kmh, implicit: true, raw };
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Conditions (maxspeed:conditional)
+  // ---------------------------------------------------------------------------
+  // Syntax: "<value> @ <condition>; <value> @ (<condition>)". Conditions use the
+  // opening_hours notation for times (Mo-Fr 07:00-17:00, sunset-sunrise, PH …) or
+  // words such as wet, snow, weight>7.5. They are sorted into the kinds of
+  // OMC_EXTRA_TYPES so the popup can hide them by kind.
+
+  /** Kind of a condition text (key of OMC_EXTRA_TYPES). @param {string} condition */
+  function conditionKind(condition) {
+    const c = condition.toLowerCase();
+    if (/\bwet\b/.test(c)) return 'wet';
+    if (/\b(snow|ice|icy)\b/.test(c)) return 'snow';
+    if (/\bfog\b/.test(c)) return 'fog';
+    if (/\bsh\b|school/.test(c)) return 'school';
+    if (/\bph\b|holiday/.test(c)) return 'holiday';
+    if (/sunrise|sunset|dawn|dusk/.test(c)) return 'daytime';
+    if (/\d{1,2}:\d{2}|\b(mo|tu|we|th|fr|sa|su)\b/.test(c)) return 'time';
+    if (/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b|winter|summer|spring|autumn/.test(c)) return 'season';
+    if (/weight|length|width|height|axle|trailer|caravan|hazmat|occupants|wheels|hgv|goods|bus/.test(c)) return 'vehicle';
+    return 'other';
+  }
+
+  const CONDITION_NAMES = {
+    de: { wet: 'bei Nässe', snow: 'bei Schnee/Eis', fog: 'bei Nebel' },
+    en: { wet: 'when wet', snow: 'in snow/ice', fog: 'in fog' },
+  };
+  const CONDITION_ICONS = {
+    wet: '💧', snow: '🌨️', fog: '🌫️', daytime: '🌙', time: '🕒', school: '🏫',
+    holiday: '🏖️', season: '🍂', vehicle: '⚖️', other: '❔',
+  };
+
+  /**
+   * Splits "80 @ wet; 30 @ (Mo-Fr 07:00-17:00; Sa 08:00-12:00)" at the semicolons
+   * that are not inside parentheses.
+   * @param {string} text
+   */
+  function splitConditional(text) {
+    /** @type {string[]} */
+    const parts = [];
+    let depth = 0;
+    let current = '';
+    for (const ch of text) {
+      if (ch === '(') depth++;
+      if (ch === ')') depth = Math.max(0, depth - 1);
+      if (ch === ';' && depth === 0) { parts.push(current); current = ''; } else current += ch;
+    }
+    parts.push(current);
+    return parts.map((p) => p.trim()).filter(Boolean);
+  }
+
+  /**
+   * Conditional limits of a maxspeed:…:conditional value.
+   * @param {unknown} value
+   * @returns {ExtraLimit[]}
+   */
+  function parseConditional(value) {
+    if (typeof value !== 'string') return [];
+    /** @type {ExtraLimit[]} */
+    const out = [];
+    for (const part of splitConditional(value.slice(0, 500))) {
+      const m = part.match(/^([^@]+?)\s*@\s*(.+)$/);
+      if (!m) continue;
+      const speed = parseSpeed(m[1]);
+      if (!speed || (speed.kind !== 'limit' && speed.kind !== 'walk')) continue;
+      const raw = m[2].trim().replace(/^\((.*)\)$/, '$1').trim();
+      const kind = conditionKind(raw);
+      const names = /** @type {Record<string, string>} */ (CONDITION_NAMES[LANG]);
+      out.push({
+        kmh: speed.kmh,
+        icon: CONDITION_ICONS[/** @type {keyof typeof CONDITION_ICONS} */ (kind)] || '❔',
+        label: names[kind] || raw,
+        raw,
+        kind,
+      });
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------------------
+  // What applies to one way, one vehicle type and one direction
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Result for one direction.
+   * @typedef {object} DirectionSpeed
+   * @property {'limit'|'missing'|'noSpeed'|'variable'} status
+   *   limit    – there is a value (kmh; may be advisory or implicit);
+   *   missing  – a road without any value for this vehicle and direction;
+   *   noSpeed  – a way type that normally has none (footway …);
+   *   variable – electronic signs without a usual maximum (maxspeed:variable=yes
+   *              alone, or the outdated maxspeed=signals).
+   * @property {number} kmh
+   * @property {boolean} advisory      Only a recommended speed (maxspeed:advisory, or maxspeed=none).
+   * @property {boolean} implicit      From a code such as DE:urban.
+   * @property {boolean} variable      Shown by electronic signs (maxspeed:variable); with
+   *                                  status "limit", kmh is the usual maximum (maxspeed).
+   * @property {string[]} variableReasons  Reasons from maxspeed:variable, e.g. ["weather"].
+   * @property {boolean} unlimited     No legal limit (maxspeed=none); kmh is then the advisory speed.
+   * @property {string} sign           Text on the sign ("" = the number).
+   * @property {SignSymbol} symbol    Official German sign drawn instead of the speed
+   *                                  sign, "" = none (see fixedSign).
+   * @property {string} source         The tag value it came from, for the tooltip.
+   * @property {Condition | null} condition  Set when the main value itself is conditional
+   *                                  (only maxspeed:conditional is tagged).
+   * @property {ExtraLimit[]} extras   Conditional limits (maxspeed:…:conditional).
+   * @property {LaneSpeed[] | null} lanes  Per-lane values, left to right in driving direction, if they differ.
+   */
+
+  /** @typedef {{ kmh: number, advisory: boolean, sign: string }} LaneSpeed */
+
+  /**
+   * Official German signs drawn instead of a speed sign: 325.1 living street,
+   * 242.1 pedestrian zone, 244.1 bicycle road, 274.1 30 zone, 274.1-20 20 zone.
+   * @typedef {'' | '325.1' | '242.1' | '244.1' | '274.1' | '274.1-20'} SignSymbol
+   */
+
+  /**
+   * Highways that should carry a speed limit; without one they are "missing".
+   * living_street gets walking pace when nothing is tagged.
+   */
+  const ROADS = new Set([
+    'motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential',
+    'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link',
+    'living_street', 'service', 'road', 'busway',
+  ]);
+  /** access values that make a missing limit plausible (vehicle may not enter). */
+  const RESTRICTED_ACCESS = new Set(['no', 'private', 'destination', 'delivery', 'customers', 'agricultural', 'forestry', 'permit']);
+
+  /** Default advisory speed for maxspeed=none (German "Richtgeschwindigkeit"). */
+  const DEFAULT_ADVISORY_KMH = 130;
+
+  /** @param {Tags} tags */
+  const isAccessRestricted = (tags) =>
+    ['access', 'vehicle', 'motor_vehicle', 'motorcar'].some((key) => RESTRICTED_ACCESS.has(tags[key]));
+
+  /** 1 = one-way in drawing direction, -1 = against it, 0 = both ways. @param {Tags} tags */
+  function onewayOf(tags) {
+    const o = tags.oneway;
+    if (o === 'yes' || o === 'true' || o === '1') return 1;
+    if (o === '-1' || o === 'reverse') return -1;
+    if (o === 'no' || o === 'false' || o === '0') return 0;
+    if (tags.highway === 'motorway' || tags.junction === 'roundabout' || tags.junction === 'circular') return 1;
+    return 0;
+  }
+
+  /**
+   * First non-empty tag among keys, e.g. maxspeed:hgv:forward, then maxspeed:hgv.
+   * @param {Tags} tags
+   * @param {string[]} keys
+   */
+  const firstTag = (tags, keys) => {
+    for (const key of keys) if (typeof tags[key] === 'string' && tags[key] !== '') return { key, value: tags[key] };
+    return null;
+  };
+
+  /**
+   * Tag keys for one value type, most specific first: vehicle + direction, vehicle,
+   * then the same without vehicle (plain maxspeed applies to every vehicle).
+   * OSM puts the direction before ":conditional" (maxspeed:forward:conditional)
+   * but after ":lanes" (maxspeed:lanes:forward).
+   * @param {string[]} vehicleSuffixes  e.g. ["hgv"] or ["bus", "coach"]; [] for cars.
+   * @param {Direction} direction
+   * @param {'' | ':lanes' | ':conditional'} part
+   */
+  function keysFor(vehicleSuffixes, direction, part) {
+    const bases = [...vehicleSuffixes.map((v) => `maxspeed:${v}`), 'maxspeed'];
+    /** @type {string[]} */
+    const keys = [];
+    for (const base of bases) {
+      keys.push(part === ':conditional' ? `${base}:${direction}${part}` : `${base}${part}:${direction}`, `${base}${part}`);
+    }
+    return keys;
+  }
+
+  /**
+   * Turns a parsed value into what is shown: maxspeed=none becomes an advisory
+   * speed (maxspeed:advisory, else 130), walk shows a pedestrian.
+   * @param {SpeedValue} value
+   * @param {number} advisoryKmh
+   */
+  function shownSpeed(value, advisoryKmh) {
+    if (value.kind === 'none') return { kmh: advisoryKmh || DEFAULT_ADVISORY_KMH, advisory: true, sign: '' };
+    if (value.kind === 'walk') return { kmh: value.kmh, advisory: false, sign: '🚶' };
+    return { kmh: value.kmh, advisory: false, sign: '' };
+  }
+
+  /**
+   * What applies to one way for one vehicle type in one direction.
+   * @param {Tags} tags
+   * @param {string[]} vehicleSuffixes
+   * @param {Direction} direction
+   * @param {number} oneway  See onewayOf.
+   * @returns {DirectionSpeed | null}  null = not a road, leave it alone.
+   */
+  function directionSpeed(tags, vehicleSuffixes, direction, oneway) {
+    /** @type {DirectionSpeed} */
+    const base = { status: 'missing', kmh: 0, advisory: false, implicit: false, unlimited: false, variable: false, variableReasons: [], sign: '', symbol: '', source: '', condition: null, extras: [], lanes: null };
+    const hasAnySpeedTag = Object.keys(tags).some((k) => k === 'maxspeed' || k.startsWith('maxspeed:') || k === 'zone:maxspeed');
+
+    const advisoryTag = firstTag(tags, [`maxspeed:advisory:${direction}`, 'maxspeed:advisory']);
+    const advisory = advisoryTag ? parseSpeed(advisoryTag.value) : null;
+    const advisoryKmh = advisory && advisory.kind === 'limit' ? advisory.kmh : 0;
+
+    const extrasTag = firstTag(tags, keysFor(vehicleSuffixes, direction, ':conditional'));
+    const extras = extrasTag ? parseConditional(extrasTag.value) : [];
+
+    // Per-lane values. On two-way roads plain maxspeed:lanes lists the lanes of both
+    // directions together, so only :lanes:forward / :lanes:backward are used there.
+    const laneKeys = keysFor(vehicleSuffixes, direction, ':lanes').filter((k) => oneway !== 0 || k.endsWith(`:${direction}`));
+    const lanesTag = firstTag(tags, laneKeys);
+    /** @type {LaneSpeed[] | null} */
+    let lanes = null;
+    if (lanesTag) {
+      const parsed = lanesTag.value.split('|').slice(0, 12).map((v) => parseSpeed(v));
+      if (parsed.length > 1 && parsed.every(Boolean)) {
+        lanes = parsed.map((v) => shownSpeed(/** @type {SpeedValue} */ (v), advisoryKmh));
+        if (lanes.every((l) => l.kmh === lanes?.[0].kmh && l.advisory === lanes?.[0].advisory)) lanes = null;
+      }
+    }
+
+    const valueTag = firstTag(tags, keysFor(vehicleSuffixes, direction, ''));
+    let value = valueTag ? parseSpeed(valueTag.value) : null;
+    let source = valueTag ? `${valueTag.key}=${valueTag.value}` : '';
+    if (!value) {
+      // Implicit limit from the type of area, if maxspeed itself is missing.
+      const typeTag = firstTag(tags, ['zone:maxspeed', 'maxspeed:type', 'source:maxspeed']);
+      const implicit = typeTag ? parseSpeed(typeTag.value) : null;
+      if (implicit) { value = { ...implicit, implicit: true }; source = `${typeTag?.key}=${typeTag?.value}`; }
+    }
+    if (!value && tags.highway === 'living_street') { value = { kind: 'walk', kmh: 7, implicit: true, raw: 'walk' }; source = 'highway=living_street'; }
+    // A bicycle road (German "Fahrradstraße") has 30 km/h unless signed otherwise.
+    const bicycleRoad = tags.bicycle_road === 'yes' || tags.cyclestreet === 'yes';
+    if (!value && bicycleRoad) { value = { kind: 'limit', kmh: 30, implicit: true, raw: '30' }; source = tags.bicycle_road === 'yes' ? 'bicycle_road=yes' : 'cyclestreet=yes'; }
+
+    // Electronic signs: maxspeed:variable=yes (or a reason such as "weather"), with
+    // maxspeed holding the usual maximum. maxspeed=signals is the outdated form.
+    const variableTag = firstTag(tags, [`maxspeed:variable:${direction}`, 'maxspeed:variable']);
+    const variable = !!variableTag && variableTag.value !== 'no';
+    const variableSource = variable ? `${variableTag?.key}=${variableTag?.value}` : '';
+    // Reasons such as "weather;peak_traffic"; "yes" gives none.
+    const variableReasons = variable
+      ? (variableTag?.value || '').split(';').map((v) => v.trim()).filter((v) => v && v !== 'yes').slice(0, 4)
+      : [];
+    Object.assign(base, { variableReasons });
+
+    if (value && value.kind === 'variable') return { ...base, status: 'variable', variable: true, source, extras };
+    if (value) {
+      // With lanes the tooltip names both tags: the value for the direction and the lanes.
+      if (lanes) source += `\n${lanesTag?.key}=${lanesTag?.value}`;
+      if (variable) source += `\n${variableSource}`;
+      const symbol = lanes || variable ? '' : fixedSign(tags, value, bicycleRoad);
+      return {
+        ...base, status: 'limit', ...shownSpeed(value, advisoryKmh), implicit: value.implicit,
+        unlimited: value.kind === 'none', source, extras, lanes, symbol, variable,
+      };
+    }
+    if (variable && !lanes) return { ...base, status: 'variable', variable: true, source: variableSource, extras };
+    if (lanes) {
+      // Only per-lane values: the lowest one stands for the whole direction.
+      const lowest = lanes.reduce((a, b) => (b.kmh < a.kmh ? b : a));
+      return { ...base, status: 'limit', ...lowest, source: `${lanesTag?.key}=${lanesTag?.value}`, extras, lanes };
+    }
+    if (advisoryKmh) return { ...base, status: 'limit', kmh: advisoryKmh, advisory: true, source: `${advisoryTag?.key}=${advisoryTag?.value}`, extras };
+    if (extras.length) {
+      // Only conditional limits: the lowest becomes the main sign, the rest extra signs.
+      const [first, ...rest] = [...extras].sort((a, b) => a.kmh - b.kmh);
+      const { kmh, ...condition } = first;
+      return { ...base, status: 'limit', kmh, source: `${extrasTag?.key}=${extrasTag?.value}`, condition, extras: rest };
+    }
+
+    const isNoSpeedType = noSpeedRules.some(([key, v]) => tags[key] === v);
+    if (isNoSpeedType && !hasAnySpeedTag) {
+      // A pedestrian zone gets its sign even without a speed limit.
+      const pedestrian = tags.highway === 'pedestrian';
+      return { ...base, status: 'noSpeed', symbol: pedestrian ? '242.1' : '', source: pedestrian ? 'highway=pedestrian' : '' };
+    }
+    if (ROADS.has(tags.highway)) return base;
+    return null;
+  }
+
+  /**
+   * German sign that stands for this value on its own, or "": 325.1 for walking
+   * pace on a living street, 244.1 for 30 on a bicycle road, 274.1 (and 274.1-20)
+   * for a 30 (20) zone, tagged as zone:maxspeed=DE:30 or maxspeed=DE:zone30 ….
+   * @param {Tags} tags
+   * @param {SpeedValue} value
+   * @param {boolean} bicycleRoad
+   * @returns {SignSymbol}
+   */
+  function fixedSign(tags, value, bicycleRoad) {
+    if (tags.highway === 'living_street' && value.kind === 'walk') return '325.1';
+    if (value.kind !== 'limit') return '';
+    if (bicycleRoad && value.kmh === 30) return '244.1';
+    const zone = [
+      /^DE:(?:zone:?)?(20|30)$/i.exec(tags['zone:maxspeed'] || ''),
+      ...[tags.maxspeed, tags['maxspeed:type'], tags['source:maxspeed']].map((v) => /^DE:zone:?(20|30)$/i.exec(v || '')),
+    ].find(Boolean);
+    if (zone && Number(zone[1]) === value.kmh) return value.kmh === 20 ? '274.1-20' : '274.1';
+    return '';
+  }
+
+  /**
+   * What applies to one way and vehicle type, per direction.
+   * On one-way roads only the driving direction counts.
+   * @param {Tags} tags
+   * @param {string[]} vehicleSuffixes
+   */
+  function waySpeed(tags, vehicleSuffixes) {
+    const oneway = onewayOf(tags);
+    const forward = oneway === -1 ? null : directionSpeed(tags, vehicleSuffixes, 'forward', oneway);
+    const backward = oneway === 1 ? null : directionSpeed(tags, vehicleSuffixes, 'backward', oneway);
+    return { oneway, forward, backward, restricted: isAccessRestricted(tags) };
+  }
+
+  // ===========================================================================
+  // Colours
+  // ===========================================================================
+  // Each unit has its own bands that match the limits actually posted in the
+  // real world. Neighbouring colours differ in hue and brightness; measured colour
+  // distance (CIE ΔE76) between any two colours is at least 28.
+
+  /**
+   * A colour band. min/max are in the display unit (km/h or mph); min is missing
+   * for the open-ended first and last bands.
+   * @typedef {{ min?: number, max: number, color: string }} ColorBand
+   */
+
+  /** Colours from slow to fast for the mph bands. */
+  const PALETTE = [
+    '#7f0000', '#d50000', '#ff6d00', '#ffab00', '#ffee58', '#c6ff00', '#64dd17', '#1b5e20',
+    '#00bfa5', '#00e5ff', '#2979ff', '#1a237e', '#aa00ff', '#ff4081', '#8d6e63',
+  ];
+  const COLOR_FASTEST = '#212121';
+
+  /**
+   * km/h: grouped by colour family, so the kind of road is visible at a glance.
+   * Each band starts at a real posted limit (30, 40, 50 …), so 30 and 39 share a colour.
+   *   red     – below 40:  ≤ 5 (walking pace), 6–29, 30–39
+   *   orange  – below 60:  40–49, 50–59
+   *   blue    – below 100: 60–69, 70–79, 80–89, 90–99
+   *   green   – below 120: 100–109, 110–119
+   *   pink    – 120–129
+   *   purple  – 130 and above
+   * @type {ColorBand[]}
+   */
+  const KMH_BANDS = [
+    { max: 5, color: '#3e0000' },
+    { min: 6, max: 29, color: '#a50000' },
+    { min: 30, max: 39, color: '#ff7961' },
+    { min: 40, max: 49, color: '#e65100' },
+    { min: 50, max: 59, color: '#ffb74d' },
+    { min: 60, max: 69, color: '#0d1b6e' },
+    { min: 70, max: 79, color: '#1565c0' },
+    { min: 80, max: 89, color: '#42a5f5' },
+    { min: 90, max: 99, color: '#80d8ff' },
+    { min: 100, max: 109, color: '#1b5e20' },
+    { min: 110, max: 119, color: '#76d275' },
+    { min: 120, max: 129, color: '#c2185b' },
+    { max: Infinity, color: '#7b1fa2' },
+  ];
+
+  /**
+   * mph: one band per 5 mph, from ≤ 5 to 85, and one band above.
+   * US limits are posted in steps of 5 mph up to 85; UK limits are 20/30/40/50/60/70.
+   * @type {ColorBand[]}
+   */
+  const MPH_BANDS = [
+    { max: 5, color: PALETTE[0] },
+    ...[...PALETTE.slice(1), '#ff00cc', '#ffaaff'].map((color, i) => ({ min: 6 + i * 5, max: 10 + i * 5, color })),
+    { max: Infinity, color: COLOR_FASTEST },
+  ];
+
+  // Missing limit: red dashes on white, as wide as a normal road. If the way's access
+  // is restricted (access=private …), a missing limit can be correct, so the
+  // background is grey instead: still visible, less loud.
+  const COLOR_MISSING = '#e53935';
+  const UNDER_MISSING = '#ffffff';
+  const UNDER_MISSING_RESTRICTED = '#9e9e9e';
+  // Dots marking an advisory speed. Pure yellow is not used by any km/h band.
+  const COLOR_ADVISORY = '#ffff00';
+  // Variable limits (maxspeed=signals): short white dashes on blue-grey, a colour no
+  // band uses, like the dark face of an electronic sign.
+  const COLOR_VARIABLE = '#ffffff';
+  const UNDER_VARIABLE = '#546e7a';
+  /** Look.dash value for round dots (drawn by drawOverlay, not a plain dasharray). */
+  const DOTS = 'dots';
+
+  /** Bands of the selected unit. */
+  const colorBands = () => (UNIT === 'mph' ? MPH_BANDS : KMH_BANDS);
+
+  /** Band for a speed given in km/h, using the selected unit. @param {number} kmh */
+  function bandFor(kmh) {
+    const value = shown(kmh); // in the selected unit, rounded: 48 km/h → 30 mph
+    const bands = colorBands();
+    return bands.find((b) => value <= b.max) || bands[bands.length - 1];
+  }
+
+  /** Legend text for a colour band, e.g. "30–39", "≤ 5" or "≥ 130". @param {ColorBand} band */
+  function bandLabel(band) {
+    const bands = colorBands();
+    if (band.max === Infinity) return `≥ ${bands[bands.length - 2].max + 1}`;
+    return band.min ? `${band.min}–${band.max}` : `≤ ${band.max}`;
+  }
+
+  // ===========================================================================
+  // How a way is drawn
+  // ===========================================================================
+  // A way is drawn as one or more stripes along the line. Each stripe covers a part
+  // of the line's width, given as fractions from -0.5 (left edge, seen in drawing
+  // direction) to +0.5 (right edge):
+  //   one look for the whole way         [-0.5, 0.5]
+  //   different limits per direction     forward [0, 0.5] (right), backward [-0.5, 0] (left)
+  //   limits per lane                    the direction's part cut into one stripe per lane
+
+  /**
+   * Colour and pattern of one stripe.
+   * @typedef {object} Look
+   * @property {string} color
+   * @property {string} dash   SVG stroke-dasharray, "" for a solid line, or DOTS for round dots.
+   * @property {string} under  Solid colour drawn under the dashes, e.g. white under red; "" = none.
+   */
+
+  /** @typedef {{ from: number, to: number, look: Look }} Stripe */
+
+  /**
+   * Where a sign goes: side 0 = on the line, +1 = right half (forward), -1 = left half.
+   * @typedef {{ side: number, info: DirectionSpeed }} SignSpot
+   */
+
+  /**
+   * How one way is drawn.
+   * @typedef {object} LineStyle
+   * @property {Stripe[]} stripes
+   * @property {boolean} overlay    Needs the overlay layer (several stripes, or a
+   *                                background under dashes); the original line is
+   *                                then made invisible.
+   * @property {string} width       SVG stroke-width, "" to keep iD's own width.
+   * @property {string} outline     iD's casing under the way: "" = leave it,
+   *                                "none" = hide it (footways).
+   * @property {SignSpot[]} signs
+   * @property {string} key         Changes whenever the look changes (used to skip redraws).
+   */
+
+  /**
+   * Look of a value: band colour; yellow dots on it for an advisory speed, long
+   * dashes if the value only applies under a condition.
+   * @param {number} kmh
+   * @param {boolean} advisory
+   * @param {boolean} conditional
+   * @returns {Look}
+   */
+  function limitLook(kmh, advisory, conditional) {
+    const band = bandFor(kmh).color;
+    if (advisory) return { color: COLOR_ADVISORY, dash: DOTS, under: band };
+    return { color: band, dash: conditional ? '12,5' : '', under: '' };
+  }
+
+  /**
+   * Look of one direction without lanes.
+   * @param {DirectionSpeed} info
+   * @param {boolean} restricted  Access is restricted (see isAccessRestricted).
+   * @returns {Look}
+   */
+  function directionLook(info, restricted) {
+    switch (info.status) {
+      case 'noSpeed': return { color: '#ffffff', dash: '5,4', under: '' };
+      case 'missing': return { color: COLOR_MISSING, dash: '6,5', under: restricted ? UNDER_MISSING_RESTRICTED : UNDER_MISSING };
+      case 'variable': return { color: COLOR_VARIABLE, dash: '3,3', under: UNDER_VARIABLE };
+      // With maxspeed:variable and a maxspeed, the line shows that maximum as usual;
+      // the electronic signs get an extra sign next to the main sign.
+      default: return limitLook(info.kmh, info.advisory, !!info.condition);
+    }
+  }
+
+  /**
+   * Stripes for one direction, covering [from, to] of the line's width.
+   * OSM lists lanes from left to right in driving direction. Driving forward that
+   * is from the low to the high end of [from, to]; driving backward it is the
+   * other way round. So on two-way roads lane 1 is next to the centre line on both
+   * sides, on oneway=yes it is the left edge, on oneway=-1 the right edge.
+   * @param {DirectionSpeed} info
+   * @param {Direction} direction
+   * @param {number} from
+   * @param {number} to
+   * @param {boolean} restricted
+   * @returns {Stripe[]}
+   */
+  function stripesFor(info, direction, from, to, restricted) {
+    const lanes = info.status === 'limit' ? info.lanes : null;
+    if (!lanes) return [{ from, to, look: directionLook(info, restricted) }];
+    const step = (to - from) / lanes.length;
+    return lanes.map((lane, i) => {
+      const k = direction === 'forward' ? i : lanes.length - 1 - i;
+      return { from: from + k * step, to: from + (k + 1) * step, look: limitLook(lane.kmh, lane.advisory, false) };
+    });
+  }
+
+  /** Everything a viewer would see for one direction, to compare the two. @param {DirectionSpeed} d */
+  const lookOf = (d) => JSON.stringify([
+    d.status, d.kmh, d.advisory, d.variable, d.sign, d.symbol, d.condition?.label, d.lanes,
+    d.extras.map((e) => [e.kmh, e.label, e.kind]),
+  ]);
+
+  /**
+   * Line style for one way and vehicle type, or null to leave iD's own style.
+   * One-way roads use the whole width for their one direction. Two-way roads are
+   * split into halves when the directions differ or have lanes: the right half
+   * (seen in drawing direction) for forward, the left half for backward, as in
+   * right-hand traffic.
+   * @param {Tags} tags
+   * @param {string[]} vehicleSuffixes  See OMC_VEHICLES, e.g. ["hgv"]; [] for cars.
+   * @returns {LineStyle | null}
+   */
+  function lineStyleFor(tags, vehicleSuffixes) {
+    const { forward, backward, restricted } = waySpeed(tags, vehicleSuffixes);
+    /** @type {Stripe[]} */
+    let stripes;
+    /** @type {SignSpot[]} */
+    let signs;
+    let width = '';
+    let outline = '';
+    if (forward && backward && (forward.lanes || backward.lanes || lookOf(forward) !== lookOf(backward))) {
+      stripes = [...stripesFor(forward, 'forward', 0, 0.5, restricted), ...stripesFor(backward, 'backward', -0.5, 0, restricted)];
+      signs = [{ side: 1, info: forward }, { side: -1, info: backward }];
+    } else {
+      const info = forward || backward;
+      if (!info) return null;
+      stripes = stripesFor(info, forward ? 'forward' : 'backward', -0.5, 0.5, restricted);
+      signs = [{ side: 0, info }];
+      if (info.status === 'noSpeed') { width = '2px'; outline = 'none'; }
+    }
+    const first = stripes[0].look;
+    const overlay = stripes.length > 1 || !!first.under || first.dash === DOTS;
+    const key = JSON.stringify([stripes, width, outline]);
+    return { stripes, overlay, width, outline, signs, key };
+  }
+
+  /** Text on the sign: the number, "🚶", or one value per lane ("100|80|60"). @param {DirectionSpeed} info */
+  function signLabel(info) {
+    if (info.status === 'variable') return '≈';
+    if (info.lanes) return info.lanes.map((l) => l.sign || String(shown(l.kmh))).join('|');
+    return info.sign || String(shown(info.kmh));
+  }
+
+  /**
+   * Tooltip of a main sign: value with notes, the condition and the tag it came from.
+   * @param {DirectionSpeed} info
+   */
+  function signTooltip(info) {
+    const t = text();
+    if (info.status === 'variable') return [t.variableSign, info.source].filter(Boolean).join('\n');
+    const symbolName = info.symbol ? t.symbols[info.symbol] : '';
+    if (info.status === 'noSpeed') return [symbolName, info.source].filter(Boolean).join('\n');
+    const speed = info.sign && !info.lanes ? `${info.sign} ${t.walk}` : `${signLabel(info)} ${unitLabel()}`;
+    const value = symbolName ? `${symbolName}: ${speed.replace(/^🚶 /, '')}` : speed;
+    const notes = [
+      info.advisory && !info.lanes ? t.advisory : '',
+      info.condition ? info.condition.label : '',
+      info.implicit ? t.implicit : '',
+    ].filter(Boolean);
+    return [
+      notes.length ? `${value} – ${notes.join(', ')}` : value,
+      // The raw condition only if the label is not already the raw text.
+      info.condition && info.condition.raw !== info.condition.label ? info.condition.raw : '',
+      info.source,
+    ].filter(Boolean).join('\n');
+  }
+
+  // ===========================================================================
+  // Supplementary signs ("Zusatzzeichen") below a speed sign
+  // ===========================================================================
+  // As on real German signs, a condition is shown on small white panels under the
+  // speed sign: an official panel where one exists (bei Nässe, Lkw, 7,5 t …), else
+  // a panel in the same style with text made from the condition, e.g.
+  // "Mo-Fr 07:00-17:00" → "Mo–Fr" / "7–17 h".
+
+  /**
+   * One panel: an official sign (key of SIGN_ART) or lines of text.
+   * @typedef {{ art: string, lines: string[] }} Panel
+   */
+
+  const PANEL_TEXT = {
+    de: {
+      days: { mo: 'Mo', tu: 'Di', we: 'Mi', th: 'Do', fr: 'Fr', sa: 'Sa', su: 'So' },
+      months: ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'],
+      PH: 'an Feiertagen', SH: 'in den Ferien', night: 'nachts', day: 'tagsüber', fog: 'bei Nebel',
+      reasons: { peak_traffic: 'Verkehrslage', weather: 'Wetter', environment: 'Umweltschutz', obstruction: 'Störung', border_control: 'Grenzkontrolle' },
+    },
+    en: {
+      days: { mo: 'Mo', tu: 'Tu', we: 'We', th: 'Th', fr: 'Fr', sa: 'Sa', su: 'Su' },
+      months: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
+      PH: 'public holidays', SH: 'school holidays', night: 'at night', day: 'by day', fog: 'in fog',
+      reasons: { peak_traffic: 'traffic', weather: 'weather', environment: 'environment', obstruction: 'obstruction', border_control: 'border control' },
+    },
+  };
+  const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  /** Longest text line on a panel; longer conditions are cut. */
+  const PANEL_MAX_CHARS = 18;
+
+  /** "07:30" → "7.30", "17:00" → "17" (German signs write times like this). @param {string} time */
+  const signTime = (time) => {
+    const [h, m] = time.split(':');
+    return m === '00' ? String(Number(h)) : `${Number(h)}.${m}`;
+  };
+
+  /**
+   * Lines for one opening_hours rule such as "Mo-Fr 07:00-17:00", "Sa,Su",
+   * "16:00-18:00", "PH" or "Nov-Mar"; null if it is not that simple.
+   * @param {string} rule
+   * @returns {string[] | null}
+   */
+  function ruleLines(rule) {
+    const words = PANEL_TEXT[LANG];
+    const r = rule.trim();
+    const special = { 'sunset-sunrise': words.night, 'dusk-dawn': words.night, 'sunrise-sunset': words.day, 'dawn-dusk': words.day };
+    const lower = r.toLowerCase();
+    if (lower in special) return [special[/** @type {keyof typeof special} */ (lower)]];
+    const m = r.match(/^((?:Mo|Tu|We|Th|Fr|Sa|Su|PH|SH)(?:\s*[-,]\s*(?:Mo|Tu|We|Th|Fr|Sa|Su|PH|SH))*)?\s*(\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}(?:\s*,\s*\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2})*)?$/i);
+    if (m && (m[1] || m[2])) {
+      const lines = [];
+      if (m[1]) {
+        // Weekdays on one line; holidays (PH, SH) each on a line of their own, as on
+        // the real panels ("Sa, So" / "an Feiertagen").
+        const parts = m[1].replace(/\s+/g, '').split(',');
+        const days = parts.filter((p) => !/^(ph|sh)$/i.test(p))
+          .map((p) => p.replace(/[A-Za-z]{2}/g, (d) => words.days[/** @type {keyof typeof words.days} */ (d.toLowerCase())] || d).replace(/-/g, '–'));
+        if (days.length) lines.push(days.join(', '));
+        for (const p of parts) if (/^(ph|sh)$/i.test(p)) lines.push(words[/** @type {'PH'|'SH'} */ (p.toUpperCase())]);
+      }
+      if (m[2]) {
+        const spans = m[2].replace(/\s+/g, '').split(',').map((span) => span.split('-').map(signTime).join('–'));
+        lines.push(`${spans.join(', ')} h`);
+      }
+      return lines;
+    }
+    const months = r.match(/^([A-Za-z]{3})\s*-\s*([A-Za-z]{3})$/);
+    if (months && MONTHS.includes(months[1].toLowerCase()) && MONTHS.includes(months[2].toLowerCase())) {
+      return [`${words.months[MONTHS.indexOf(months[1].toLowerCase())]}–${words.months[MONTHS.indexOf(months[2].toLowerCase())]}`];
+    }
+    return null;
+  }
+
+  /**
+   * Panels for one condition of maxspeed:conditional.
+   * @param {Condition} condition
+   * @returns {Panel[]}
+   */
+  function conditionPanels(condition) {
+    const words = PANEL_TEXT[LANG];
+    /** @type {Panel[]} */
+    const panels = [];
+    // "weight>7.5 AND hgv" → one panel per part.
+    for (const part of condition.raw.split(/\s+AND\s+/i).map((p) => p.trim()).filter(Boolean)) {
+      const lower = part.toLowerCase();
+      const weight = lower.match(/^(?:max)?weight(?:rating)?\s*>\s*(\d+(?:\.\d+)?)$/);
+      if (lower === 'wet') panels.push({ art: '1053-35', lines: [] });
+      else if (/^(snow|ice|icy)$/.test(lower)) panels.push({ art: 'snow', lines: [] });
+      else if (lower === 'fog') panels.push({ art: '', lines: [words.fog] });
+      else if (lower === 'hgv' || lower === 'goods') panels.push({ art: '1010-51', lines: [] });
+      else if (lower === 'trailer' || lower === 'caravan') panels.push({ art: '1010-59', lines: [] });
+      else if (lower === 'bus' || lower === 'coach') panels.push({ art: '1010-57', lines: [] });
+      else if (lower === 'school') panels.push({ art: '1012-50', lines: [] });
+      else if (weight && Number(weight[1]) === 7.5) panels.push({ art: '1053-33', lines: [] });
+      else if (weight) panels.push({ art: '', lines: [`${LANG === 'de' ? weight[1].replace('.', ',') : weight[1]} t`] });
+      else {
+        // Times: several rules separated by ";" become several lines, at most four.
+        const rules = part.split(';').map(ruleLines);
+        const lines = rules.every(Boolean) ? rules.flatMap((l) => /** @type {string[]} */ (l)) : [part];
+        panels.push({ art: '', lines: lines.slice(0, 4).map((l) => (l.length > PANEL_MAX_CHARS ? `${l.slice(0, PANEL_MAX_CHARS - 1)}…` : l)) });
+      }
+    }
+    return panels.slice(0, 3);
+  }
+
+  /**
+   * Panel for a value that only applies to the selected vehicle type, e.g. a truck
+   * panel under the sign when the value came from maxspeed:hgv.
+   * @param {DirectionSpeed} info
+   * @returns {Panel[]}
+   */
+  function vehiclePanels(info) {
+    const m = info.source.match(/^maxspeed:(hgv|bus|coach|trailer|caravan)\b/);
+    if (!m) return [];
+    const art = { hgv: '1010-51', bus: '1010-57', coach: '1010-57', trailer: '1010-59', caravan: '1010-59' }[/** @type {'hgv'} */ (m[1])];
+    return [{ art, lines: [] }];
+  }
+
+  /**
+   * Panels under the electronic-sign extra sign: the reasons of maxspeed:variable
+   * (school_zone gets the official "Schule" panel).
+   * @param {DirectionSpeed} info
+   * @returns {Panel[]}
+   */
+  function variablePanels(info) {
+    const reasons = PANEL_TEXT[LANG].reasons;
+    return info.variableReasons.map((reason) => (reason === 'school_zone'
+      ? { art: '1012-50', lines: [] }
+      : { art: '', lines: [(reasons[/** @type {keyof typeof reasons} */ (reason)] || reason).slice(0, PANEL_MAX_CHARS)] }));
+  }
+
+  /** All panels under a main sign: vehicle first, then its condition. @param {DirectionSpeed} info */
+  const mainPanels = (info) => [...vehiclePanels(info), ...(info.condition ? conditionPanels(info.condition) : [])];
+
+  // Exports for the Node tests; in the browser this branch is skipped.
+  if (typeof module !== 'undefined') {
+    module.exports = {
+      parseSpeed, parseConditional, directionSpeed, waySpeed, onewayOf, lineStyleFor, signLabel, signTooltip,
+      conditionPanels, mainPanels, variablePanels,
+      setDisplay, setNoSpeedRules, setExtraTypes, setVehicles, suffixesFor, checkSettings, bandFor, bandLabel, colorBands, shown,
+    };
+    return;
+  }
+
+  // ===========================================================================
+  // From here on: browser only
+  // ===========================================================================
+
+  // iD runs at /id (an iframe inside /edit); other pages of the site are left alone.
+  if (!/^\/(id|edit)(\/|$)/.test(location.pathname)) return;
+
+  // Chrome injects the script once per frame; never run twice.
+  const win = /** @type {Window & { __osmMaxspeedColors?: boolean }} */ (window);
+  if (win.__osmMaxspeedColors) return;
+  win.__osmMaxspeedColors = true;
+
+  // ---------------------------------------------------------------------------
+  // Settings from the popup (forwarded by bridge.js)
+  // ---------------------------------------------------------------------------
+
+  /** @type {Settings} */
+  let settings = checkSettings(null);
+  let onSettingsChanged = () => {};
+
+  window.addEventListener('message', (event) => {
+    // Only messages from this very page; anything else is ignored.
+    if (event.source !== window || event.origin !== location.origin) return;
+    const msg = event.data;
+    if (!msg || typeof msg !== 'object' || msg.__omc !== 'settings') return;
+    // Any script on the page could send this message, so the values are checked.
+    settings = checkSettings(msg.settings);
+    setNoSpeedRules(msg.noSpeed);
+    setExtraTypes(msg.extraTypes);
+    setVehicles(msg.vehicles);
+    setDisplay(settings);
+    onSettingsChanged();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Drawing on the map
+  // ---------------------------------------------------------------------------
+
+  // iD is a single-page app: start once its map layer exists.
+  const waitForMap = setInterval(() => {
+    if (document.querySelector('.layer-osm')) { clearInterval(waitForMap); start(); }
+  }, 1000);
+
+  function start() {
+    // Position and folded state of the legend are remembered per site.
+    const LEGEND_STORE = 'osm-maxspeed-colors';
+    /** @type {{ pos: { x: number, y: number } | null, collapsed: boolean }} */
+    const legendState = { pos: null, collapsed: false };
+    try {
+      const saved = JSON.parse(localStorage.getItem(LEGEND_STORE) || '{}');
+      if (saved && Number.isFinite(saved.pos?.x) && Number.isFinite(saved.pos?.y)) legendState.pos = { x: saved.pos.x, y: saved.pos.y };
+      legendState.collapsed = saved?.collapsed === true;
+    } catch { /* unreadable – keep the defaults */ }
+    const saveLegendState = () => {
+      try { localStorage.setItem(LEGEND_STORE, JSON.stringify(legendState)); } catch { /* storage full or blocked */ }
+    };
+
+    /** Last style key per way line, to skip lines that did not change. @type {WeakMap<SVGPathElement, string>} */
+    const appliedKey = new WeakMap();
+    /** Current style per way line, used for the overlay and the signs. @type {WeakMap<SVGPathElement, LineStyle | null>} */
+    const lineStyle = new WeakMap();
+    // iD replaces a way's tags object whenever the way is edited, so the style can
+    // be kept per tags object until the settings change.
+    /** @type {WeakMap<object, LineStyle | null>} */
+    let styleByTags = new WeakMap();
+    let redrawPending = false;
+    /** @type {HTMLDivElement | null} */
+    let legend = null;
+
+    onSettingsChanged = () => {
+      // Language, unit or vehicle may have changed: rebuild the legend, redraw everything.
+      styleByTags = new WeakMap();
+      if (legend) { legend.remove(); legend = null; }
+      scheduleRedraw();
+    };
+    // Ask bridge.js for the current settings now that we are listening.
+    window.postMessage({ __omc: 'ready' }, location.origin);
+
+    /**
+     * Data iD attached to an SVG element, if it looks like an OSM entity.
+     * @param {Element} element
+     * @returns {{ id: string, tags: Tags } | null}
+     */
+    function entityOf(element) {
+      const data = /** @type {any} */ (element).__data__;
+      if (!data || typeof data !== 'object' || typeof data.id !== 'string') return null;
+      const tags = data.tags;
+      return tags && typeof tags === 'object' ? { id: data.id, tags } : null;
+    }
+
+    /** @param {Tags} tags */
+    function styleOf(tags) {
+      let style = styleByTags.get(tags);
+      if (style === undefined) {
+        style = lineStyleFor(tags, suffixesFor(settings.vehicle));
+        styleByTags.set(tags, style);
+      }
+      return style;
+    }
+
+    /** Colours one way line. @param {SVGPathElement} path */
+    function paintLine(path) {
+      const entity = settings.enabled ? entityOf(path) : null;
+      const style = entity ? styleOf(entity.tags) : null;
+      lineStyle.set(path, style);
+
+      const key = style ? style.key : '';
+      if ((appliedKey.get(path) || '') === key) return;
+      appliedKey.set(path, key);
+
+      const css = path.style;
+      if (!style) {
+        for (const prop of ['stroke', 'stroke-dasharray', 'stroke-opacity', 'stroke-linecap', 'stroke-width']) css.removeProperty(prop);
+        return;
+      }
+      if (style.overlay) {
+        // Drawn by drawOverlay instead (stripes, or dashes on a coloured
+        // background), so the original line is made invisible. It stays clickable.
+        for (const prop of ['stroke', 'stroke-dasharray', 'stroke-linecap', 'stroke-width']) css.removeProperty(prop);
+        css.setProperty('stroke-opacity', '0', 'important');
+        return;
+      }
+      const look = style.stripes[0].look;
+      css.setProperty('stroke', look.color, 'important');
+      css.setProperty('stroke-opacity', '1', 'important');
+      if (style.width) css.setProperty('stroke-width', style.width, 'important');
+      else css.removeProperty('stroke-width');
+      if (look.dash) {
+        css.setProperty('stroke-dasharray', look.dash, 'important');
+        // iD draws round line ends; their caps would fill the gaps of a dashed line.
+        css.setProperty('stroke-linecap', 'butt', 'important');
+      } else {
+        css.removeProperty('stroke-dasharray');
+        css.removeProperty('stroke-linecap');
+      }
+    }
+
+    function redraw() {
+      redrawPending = false;
+      if (!document.querySelector('.layer-osm')) return;
+      updateLegend();
+      // One <path class="way line stroke"> per way. ".casing" is the outline below,
+      // ".shadow" the selection halo and ".target" iD's invisible click area; those
+      // stay untouched here.
+      const lines = /** @type {SVGPathElement[]} */ (Array.from(
+        document.querySelectorAll('.layer-osm path.way.line:not(.shadow):not(.casing):not(.target)'),
+      ));
+      lines.forEach(paintLine);
+      styleOutlines(lines);
+      drawOverlay(lines);
+      drawSigns(lines);
+    }
+
+    function scheduleRedraw() {
+      if (redrawPending) return;
+      redrawPending = true;
+      requestAnimationFrame(redraw);
+    }
+
+    // iD draws an outline (casing) under each way as a separate element with the same
+    // data. For footways and other "no speed" ways it is hidden, so the thin white
+    // dashes stand on the base map.
+    /** Outline value applied per element, to skip unchanged ones. @type {WeakMap<SVGPathElement, string>} */
+    const appliedOutline = new WeakMap();
+    /** @param {SVGPathElement[]} lines */
+    function styleOutlines(lines) {
+      /** Way id → wanted outline. @type {Map<string, string>} */
+      const outlineById = new Map();
+      for (const line of lines) {
+        const entity = entityOf(line);
+        const outline = lineStyle.get(line)?.outline;
+        if (entity && outline) outlineById.set(entity.id, outline);
+      }
+      for (const path of /** @type {NodeListOf<SVGPathElement>} */ (document.querySelectorAll('.layer-osm path.way.casing'))) {
+        const entity = entityOf(path);
+        const wanted = (settings.enabled && entity && outlineById.get(entity.id)) || '';
+        if ((appliedOutline.get(path) || '') === wanted) continue;
+        appliedOutline.set(path, wanted);
+        const css = path.style;
+        if (wanted === 'none') css.setProperty('stroke-opacity', '0', 'important');
+        else css.removeProperty('stroke-opacity');
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Speed-limit signs
+    // -------------------------------------------------------------------------
+
+    const SVG_NS = 'http://www.w3.org/2000/svg';
+    const SIGN_RADIUS = 11; // px
+    const EXTRA_SIGN_RADIUS = 9; // px, the small signs for conditional limits
+    const SIGN_SPACING = 450; // px between signs along long roads
+    /** Smallest free space between two signs, in px. */
+    const SIGN_CLEARANCE = 4;
+    const MAX_SIGNS = 400;
+    /** Space between a sign and the next extra sign, in px. */
+    const SIGN_GAP = 5;
+    /** Height of an official sign (325.1, 274.1 …) as a multiple of the round sign's diameter. */
+    const SYMBOL_SCALE = 1.1;
+    /** Width of a supplementary panel as a multiple of the round sign's diameter. */
+    const PANEL_SCALE = 1.2;
+    /** Space between a sign and its panels, in px. */
+    const PANEL_GAP = 1.5;
+    /**
+     * Condition shown as a sample panel in the legend, per kind of OMC_EXTRA_TYPES
+     * ("" = a "?" panel). Unknown kinds keep their emoji.
+     * @type {Record<string, string>}
+     */
+    const LEGEND_PANEL_SAMPLES = {
+      wet: 'wet', snow: 'snow', fog: 'fog', daytime: 'sunset-sunrise', time: 'Mo-Fr 07:00-17:00',
+      school: 'school', holiday: 'PH', season: 'Nov-Mar', vehicle: 'weight>7.5', other: '',
+    };
+    /** Sign radius the legend's sample panels are scaled to. */
+    const LEGEND_PANEL_RADIUS = 9;
+    const PANEL_FONT ="'DIN 1451 Mittelschrift','DIN Alternate','Roboto Condensed','Arial Narrow',sans-serif";
+    /** A parallel line closer than this (px) counts as a neighbour, see awayFromNeighbour. */
+    const NEIGHBOUR_DISTANCE = 60;
+    /** Lines whose directions differ by more than about 25° are not parallel (sine of the angle). */
+    const NEIGHBOUR_MAX_SINE = 0.42;
+    /** Distance between samples for the neighbour lookup, in px, and their upper bound per redraw. */
+    const NEIGHBOUR_SAMPLE_STEP = 15;
+    const MAX_NEIGHBOUR_SAMPLES = 20000;
+    /** @type {SVGGElement | null} */
+    let signLayer = null;
+
+    /**
+     * @param {string} name
+     * @param {Record<string, string | number>} attrs
+     */
+    function svgElement(name, attrs) {
+      const el = document.createElementNS(SVG_NS, name);
+      for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, String(value));
+      return el;
+    }
+
+    /** Font size of a sign's text: smaller for three characters and more. @param {string} label @param {number} r */
+    const signFontSize = (label, r) => ([...label].length >= 3 ? 0.82 : 1) * r;
+
+    /**
+     * Half the width of a sign. Up to three characters fit into the round sign;
+     * longer texts (one value per lane) get an elongated sign.
+     * @param {string} label
+     * @param {number} r
+     */
+    function signHalfWidth(label, r) {
+      const chars = [...label].length;
+      return chars <= 3 ? r : Math.max(r, (chars * 0.56 * signFontSize(label, r)) / 2 + r * 0.55);
+    }
+
+    // Official sign artwork (SIGN_ART, at the end of this file) is put into the map
+    // once as <symbol> elements and drawn with <use>, so each sign on the map is a
+    // single small element.
+    /** @type {SVGDefsElement | null} */
+    let artDefs = null;
+
+    /** Makes sure the <symbol> elements exist in the map's SVG. @param {SVGSVGElement} svg */
+    function ensureArt(svg) {
+      if (artDefs && artDefs.ownerSVGElement === svg && artDefs.isConnected) return;
+      artDefs = /** @type {SVGDefsElement} */ (svgElement('defs', { class: 'osm-maxspeed-art' }));
+      for (const [key, art] of Object.entries(SIGN_ART)) {
+        const symbol = svgElement('symbol', { id: `omc-sign-${key}`, viewBox: `0 0 ${art.width} ${art.height}` });
+        // The artwork is a constant in this file, never data from the page.
+        const parsed = new DOMParser().parseFromString(`<svg xmlns="${SVG_NS}">${art.svg}</svg>`, 'image/svg+xml');
+        symbol.append(...Array.from(parsed.documentElement.childNodes).map((n) => document.importNode(n, true)));
+        artDefs.append(symbol);
+      }
+      svg.prepend(artDefs);
+    }
+
+    /**
+     * An official sign, `height` px high, centred on (cx, cy).
+     * @param {string} key  Key of SIGN_ART.
+     * @param {number} cx
+     * @param {number} cy
+     * @param {number} height
+     */
+    function artUse(key, cx, cy, height) {
+      const art = SIGN_ART[key];
+      const width = (height * art.width) / art.height;
+      return svgElement('use', { href: `#omc-sign-${key}`, x: cx - width / 2, y: cy - height / 2, width, height });
+    }
+
+    /** @typedef {{ l: number, t: number, r: number, b: number }} Box  Extent around a sign's centre, in px. */
+
+    // Panel text is measured with the font the browser actually uses; a guess per
+    // character was too small for the fallback fonts (text touched the edge, 2026-10-24).
+    const measureContext = document.createElement('canvas').getContext('2d');
+    /** Width of panel text in px. @param {string} line @param {number} fontSize */
+    function textWidth(line, fontSize) {
+      if (!measureContext) return [...line].length * fontSize * 0.62;
+      measureContext.font = `600 ${fontSize}px ${PANEL_FONT}`;
+      return measureContext.measureText(line).width;
+    }
+
+    /**
+     * Supplementary panels stacked under a sign, starting at y = top; appended to
+     * `group`. Returns the bottom edge and the widest half width.
+     * @param {SVGElement} group
+     * @param {Panel[]} panels
+     * @param {number} r    Radius of the sign above; panels scale with it.
+     * @param {number} top
+     */
+    function addPanels(group, panels, r, top) {
+      const baseWidth = 2 * r * PANEL_SCALE;
+      let y = top;
+      let halfWidth = 0;
+      for (const panel of panels) {
+        y += PANEL_GAP;
+        if (panel.art && panel.art !== 'snow' && SIGN_ART[panel.art]) {
+          // Square panels (bei Nässe) are drawn a bit narrower, else they get very tall.
+          const art = SIGN_ART[panel.art];
+          const width = baseWidth * (art.width / art.height < 1.3 ? 0.8 : 1);
+          const height = (width * art.height) / art.width;
+          group.append(artUse(panel.art, 0, y + height / 2, height));
+          y += height;
+          halfWidth = Math.max(halfWidth, width / 2);
+          continue;
+        }
+        // A panel in the official style: white, black edge, black text (or the snow symbol).
+        const fontSize = baseWidth * 0.3;
+        const lineHeight = fontSize * 1.1;
+        // Free space between text and edge, as on the real panels.
+        const padX = fontSize * 0.55;
+        const padY = fontSize * 0.3;
+        const lines = panel.art === 'snow' ? [] : panel.lines;
+        const longest = Math.max(0, ...lines.map((l) => textWidth(l, fontSize)));
+        const width = Math.max(baseWidth, longest + 2 * padX);
+        const height = panel.art === 'snow' ? baseWidth * 0.55 : lines.length * lineHeight + 2 * padY;
+        group.append(svgElement('rect', { x: -width / 2, y, width, height, rx: 1.5, fill: '#fff', stroke: '#111', 'stroke-width': 0.8 }));
+        if (panel.art === 'snow') group.append(artUse('snow', 0, y + height / 2, height * 0.8));
+        lines.forEach((line, i) => {
+          const t = svgElement('text', {
+            x: 0, y: y + padY + lineHeight * (i + 0.5), 'text-anchor': 'middle', 'dominant-baseline': 'central',
+            'font-family': PANEL_FONT, 'font-weight': 600, 'font-size': fontSize.toFixed(2), fill: '#111',
+          });
+          t.textContent = line;
+          group.append(t);
+        });
+        y += height;
+        halfWidth = Math.max(halfWidth, width / 2);
+      }
+      return { bottom: y, halfWidth };
+    }
+
+    /**
+     * One sign with its panels, drawn around (0, 0): red ring for a maximum speed,
+     * blue square for an advisory speed (like the German sign 380), dark square for
+     * variable signs, or an official sign (symbol). `inner` puts an official sign on
+     * the dark face of an electronic sign (282 where there is no limit otherwise).
+     * Returns the group, not yet placed, and its extent.
+     * @param {{ label: string, kind: 'limit'|'advisory'|'variable', symbol?: SignSymbol, inner?: string, panels: Panel[], radius?: number, tooltip?: string }} spec
+     * @returns {{ group: SVGGElement, box: Box }}
+     */
+    function signUnit(spec) {
+      const { label, kind } = spec;
+      const r = spec.radius || SIGN_RADIUS;
+      const group = /** @type {SVGGElement} */ (svgElement('g', {}));
+      // Shown by our own tooltip (see showSignTooltip); the sign itself never takes
+      // mouse events, so clicks reach the map underneath.
+      if (spec.tooltip) group.setAttribute('data-tooltip', spec.tooltip);
+      /** @type {Box} */
+      let box;
+      if (spec.inner && SIGN_ART[spec.inner]) {
+        box = { l: -r, t: -r, r, b: r };
+        drawSignFace(group, '', kind, r, r);
+        group.append(artUse(spec.inner, 0, 0, 2 * r * 0.84));
+      } else if (spec.symbol && SIGN_ART[spec.symbol]) {
+        const height = 2 * r * SYMBOL_SCALE;
+        const use = artUse(spec.symbol, 0, 0, height);
+        group.append(use);
+        const half = Number(use.getAttribute('width')) / 2;
+        box = { l: -half, t: -height / 2, r: half, b: height / 2 };
+      } else {
+        const w = signHalfWidth(label, r);
+        box = { l: -w, t: -r, r: w, b: r };
+        drawSignFace(group, label, kind, r, w);
+      }
+      const { bottom, halfWidth } = addPanels(group, spec.panels, r, box.b);
+      return { group, box: { l: Math.min(box.l, -halfWidth), t: box.t, r: Math.max(box.r, halfWidth), b: bottom } };
+    }
+
+    /**
+     * Ring, square or bar with the speed in it.
+     * @param {SVGElement} sign
+     * @param {string} label
+     * @param {'limit'|'advisory'|'variable'} kind
+     * @param {number} r
+     * @param {number} w  Half width.
+     */
+    function drawSignFace(sign, label, kind, r, w) {
+      if (kind === 'advisory') {
+        sign.append(svgElement('rect', { x: -w, y: -r, width: 2 * w, height: 2 * r, rx: 2, fill: '#1d4ed8', stroke: '#fff', 'stroke-width': 1.5 }));
+      } else if (kind === 'variable') {
+        // Dark face of an electronic sign.
+        sign.append(svgElement('rect', { x: -w, y: -r, width: 2 * w, height: 2 * r, rx: 3, fill: '#212121', stroke: '#fff', 'stroke-width': 1.5 }));
+      } else if (w > r) {
+        // Ring stretched to a rounded bar for one value per lane.
+        const sw = r * 0.27;
+        sign.append(svgElement('rect', { x: -w + sw / 2, y: -r + sw / 2, width: 2 * w - sw, height: 2 * r - sw, rx: r - sw / 2, fill: '#fff', stroke: '#d00', 'stroke-width': sw }));
+      } else {
+        sign.append(svgElement('circle', { r, fill: '#fff', stroke: '#d00', 'stroke-width': r * 0.27 }));
+      }
+      const value = svgElement('text', {
+        'text-anchor': 'middle', 'dominant-baseline': 'central',
+        'font-family': 'system-ui,sans-serif', 'font-weight': 700,
+        'font-size': signFontSize(label, r),
+        fill: kind === 'advisory' ? '#fff' : kind === 'variable' ? '#ffca28' : '#111',
+      });
+      value.textContent = label;
+      sign.append(value);
+    }
+
+    // -------------------------------------------------------------------------
+    // Overlay: stripes and dashes on a background
+    // -------------------------------------------------------------------------
+
+    /** @type {SVGGElement | null} */
+    let overlayLayer = null;
+    /** Upper bound of sampled points per redraw, so huge views stay fast. */
+    const MAX_STRIPE_POINTS = 50000;
+    /** Distance between sampled points along a way, in px. */
+    const STRIPE_SAMPLE_STEP = 4;
+
+    /**
+     * Path data for a line parallel to the given points, `offset` px to the right
+     * (negative = left), converted with `matrix` into the overlay layer.
+     * @param {DOMPoint[]} points  Points along the way, in path coordinates.
+     * @param {number} offset
+     * @param {DOMMatrix | null} matrix
+     */
+    function parallelPathData(points, offset, matrix) {
+      const out = [];
+      for (let i = 0; i < points.length; i++) {
+        const before = points[Math.max(0, i - 1)];
+        const after = points[Math.min(points.length - 1, i + 1)];
+        const len = Math.hypot(after.x - before.x, after.y - before.y) || 1;
+        // Right-hand normal (screen y points down).
+        const nx = -(after.y - before.y) / len;
+        const ny = (after.x - before.x) / len;
+        const p = new DOMPoint(points[i].x + nx * offset, points[i].y + ny * offset);
+        const q = matrix ? p.matrixTransform(matrix) : p;
+        out.push(`${q.x.toFixed(1)},${q.y.toFixed(1)}`);
+      }
+      return `M${out.join('L')}`;
+    }
+
+    /**
+     * Draws what a single SVG line cannot show (LineStyle.overlay): several stripes
+     * side by side (directions, lanes) and dashes on a coloured background, e.g. red
+     * on white for a missing limit, at exactly the width of the way.
+     * The layer sits directly after iD's line layer, so points and labels stay on top.
+     * iD has more than one layer with way lines: ".layer-osm.covered" (e.g. streams)
+     * comes before ".layer-osm.lines". The overlay must follow the last of them,
+     * otherwise the roads' casings cover it. Taking the first line's layer did that
+     * whenever a stream happened to be in view (2026-10-24).
+     * @param {SVGPathElement[]} lines  In document order.
+     */
+    function drawOverlay(lines) {
+      const roadLayer = lines.length ? lines[lines.length - 1].closest('.layer-osm') : null;
+      if (!roadLayer) return;
+      if (!overlayLayer || !overlayLayer.isConnected) {
+        overlayLayer = /** @type {SVGGElement} */ (svgElement('g', { class: 'osm-maxspeed-stripes', 'pointer-events': 'none' }));
+      }
+      if (roadLayer.nextSibling !== overlayLayer) roadLayer.after(overlayLayer);
+
+      const overlay = document.createDocumentFragment();
+      const layerMatrix = overlayLayer.getCTM();
+      if (settings.enabled && layerMatrix) {
+        const toLayer = layerMatrix.inverse();
+        let budget = MAX_STRIPE_POINTS;
+        for (const line of lines) {
+          const style = lineStyle.get(line);
+          if (!style || !style.overlay) continue;
+          const pathMatrix = line.getCTM();
+          const matrix = pathMatrix ? toLayer.multiply(pathMatrix) : null;
+          const width = parseFloat(getComputedStyle(line).strokeWidth) || 6;
+          const scale = matrix ? Math.hypot(matrix.a, matrix.b) : 1;
+
+          /**
+           * Background (if any) and dashes along the given path data.
+           * @param {Look} look
+           * @param {Record<string, string | number>} shape  d, stroke-width and optionally transform.
+           */
+          const addLine = (look, shape) => {
+            const common = { fill: 'none', 'stroke-linecap': 'butt', 'stroke-linejoin': 'round', ...shape };
+            if (look.under) overlay.append(svgElement('path', { ...common, stroke: look.under }));
+            const top = svgElement('path', { ...common, stroke: look.color });
+            if (look.dash === DOTS) {
+              // Round dots in the middle of the stripe: zero-length dashes with round
+              // caps, on a narrower stroke. (Short dashes with straight ends on the
+              // full width look like bars across the road instead.)
+              const stripeWidth = Number(shape['stroke-width']) || 6;
+              const dotSize = stripeWidth * 0.5;
+              top.setAttribute('stroke-width', String(dotSize));
+              top.setAttribute('stroke-linecap', 'round');
+              top.setAttribute('stroke-dasharray', `0 ${dotSize * 2.2}`);
+            } else if (look.dash) {
+              top.setAttribute('stroke-dasharray', look.dash);
+            }
+            overlay.append(top);
+          };
+
+          /** Sampled points along the way, only computed if a stripe needs them. @type {DOMPoint[] | null} */
+          let points = null;
+          for (const stripe of style.stripes) {
+            if (stripe.from <= -0.5 && stripe.to >= 0.5) {
+              // Whole way: copy of the original path, same width, same position.
+              /** @type {Record<string, string | number>} */
+              const shape = { d: line.getAttribute('d') || '', 'stroke-width': width };
+              if (matrix) shape.transform = `matrix(${matrix.a},${matrix.b},${matrix.c},${matrix.d},${matrix.e},${matrix.f})`;
+              addLine(stripe.look, shape);
+              continue;
+            }
+            if (!points) {
+              let length;
+              try { length = line.getTotalLength(); } catch { break; }
+              const count = Math.max(2, Math.ceil(length / STRIPE_SAMPLE_STEP) + 1);
+              if (count > budget) break;
+              budget -= count;
+              points = [];
+              for (let i = 0; i < count; i++) {
+                const p = line.getPointAtLength((length * i) / (count - 1));
+                points.push(new DOMPoint(p.x, p.y));
+              }
+            }
+            const centre = ((stripe.from + stripe.to) / 2) * width;
+            addLine(stripe.look, { d: parallelPathData(points, centre, matrix), 'stroke-width': (stripe.to - stripe.from) * width * scale });
+          }
+        }
+      }
+      overlayLayer.replaceChildren(overlay);
+    }
+
+    /** @param {SVGPathElement[]} lines */
+    function drawSigns(lines) {
+      // SVG has no z-index: whatever comes last is drawn on top. iD has more layers
+      // after .layer-osm, so the signs go to the very end of the map's SVG.
+      const svg = lines.length ? lines[0].ownerSVGElement : null;
+      if (!svg) return;
+      if (!signLayer || !signLayer.isConnected) {
+        signLayer = /** @type {SVGGElement} */ (svgElement('g', { class: 'osm-maxspeed-signs', 'pointer-events': 'none' }));
+      }
+      if (svg.lastChild !== signLayer) svg.append(signLayer);
+
+      const signs = document.createDocumentFragment();
+      const layerMatrix = signLayer.getCTM();
+      if (settings.enabled && settings.signs && layerMatrix) {
+        const toLayer = layerMatrix.inverse();
+        const hiddenKinds = new Set(settings.hiddenExtras);
+        ensureArt(svg);
+        /** Boxes of the signs placed so far, in layer coordinates. @type {Box[]} */
+        const placed = [];
+        /** @param {Box} box @param {number} x @param {number} y */
+        const isFree = (box, x, y) => placed.every((p) =>
+          x + box.r + SIGN_CLEARANCE <= p.l || x + box.l - SIGN_CLEARANCE >= p.r
+          || y + box.b + SIGN_CLEARANCE <= p.t || y + box.t - SIGN_CLEARANCE >= p.b);
+        /** @param {Box} box @param {number} x @param {number} y */
+        const place = (box, x, y) => placed.push({ l: x + box.l, t: y + box.t, r: x + box.r, b: y + box.b });
+        /** How far a box reaches from its centre in direction u (a unit vector). @param {Box} box @param {{ x: number, y: number }} u */
+        const reach = (box, u) => Math.max(box.l * u.x, box.r * u.x) + Math.max(box.t * u.y, box.b * u.y);
+        /** @param {DirectionSpeed} info */
+        const hasSign = (info) => info.status === 'limit' || info.status === 'variable' || (info.status === 'noSpeed' && !!info.symbol);
+
+        /** Lines that get signs, with what both passes below need. */
+        const signLines = [];
+        for (const line of lines) {
+          const style = lineStyle.get(line);
+          if (!style || !style.signs.some((s) => hasSign(s.info))) continue;
+          let length;
+          try { length = line.getTotalLength(); } catch { continue; }
+          if (length < 3 * SIGN_RADIUS) continue; // too short at this zoom level
+          // Path coordinates → sign-layer coordinates, in case groups in between are moved.
+          const pathMatrix = line.getCTM();
+          const toSigns = pathMatrix ? toLayer.multiply(pathMatrix) : null;
+          const toLayerPoint = (/** @type {number} */ at) => {
+            const p = line.getPointAtLength(Math.max(0, Math.min(length, at)));
+            return toSigns ? new DOMPoint(p.x, p.y).matrixTransform(toSigns) : p;
+          };
+          signLines.push({ style, length, toLayerPoint });
+        }
+
+        // Neighbouring lines. A dual carriageway is two one-way ways side by side; a
+        // sign on the line itself would run into the other line's signs. So for every
+        // sign we look for another signed line running alongside within
+        // NEIGHBOUR_DISTANCE and put the sign on the far side, like the two halves of
+        // a split way. The lines are sampled coarsely into a grid for the lookup.
+        /** Grid cell → samples [x, y, unit direction x, unit direction y, line index]. @type {Map<string, Array<[number, number, number, number, number]>>} */
+        const grid = new Map();
+        const cellOf = (/** @type {number} */ x, /** @type {number} */ y) => `${Math.floor(x / NEIGHBOUR_DISTANCE)},${Math.floor(y / NEIGHBOUR_DISTANCE)}`;
+        let sampleBudget = MAX_NEIGHBOUR_SAMPLES;
+        signLines.forEach(({ length, toLayerPoint }, index) => {
+          const count = Math.ceil(length / NEIGHBOUR_SAMPLE_STEP) + 1;
+          if (count > sampleBudget) return;
+          sampleBudget -= count;
+          let previous = toLayerPoint(0);
+          for (let i = 1; i < count; i++) {
+            const p = toLayerPoint((length * i) / (count - 1));
+            const len = Math.hypot(p.x - previous.x, p.y - previous.y) || 1;
+            const x = (p.x + previous.x) / 2, y = (p.y + previous.y) / 2;
+            const key = cellOf(x, y);
+            let cell = grid.get(key);
+            if (!cell) grid.set(key, (cell = []));
+            cell.push([x, y, (p.x - previous.x) / len, (p.y - previous.y) / len, index]);
+            previous = p;
+          }
+        });
+
+        /**
+         * Side away from the nearest parallel signed line next to `at`: +1 = right,
+         * -1 = left, 0 = no such line.
+         * @param {{ x: number, y: number }} at
+         * @param {{ x: number, y: number }} right  Right-hand normal at `at`.
+         * @param {number} index  Own line, which is skipped.
+         */
+        function awayFromNeighbour(at, right, index) {
+          const cx = Math.floor(at.x / NEIGHBOUR_DISTANCE), cy = Math.floor(at.y / NEIGHBOUR_DISTANCE);
+          let nearest = Infinity;
+          let side = 0;
+          for (let gx = cx - 1; gx <= cx + 1; gx++) {
+            for (let gy = cy - 1; gy <= cy + 1; gy++) {
+              for (const [x, y, dx, dy, other] of grid.get(`${gx},${gy}`) || []) {
+                if (other === index) continue;
+                // Parallel (either way round): direction almost along ours, i.e. almost
+                // perpendicular to our normal.
+                if (Math.abs(dx * right.x + dy * right.y) > NEIGHBOUR_MAX_SINE) continue;
+                const across = (x - at.x) * right.x + (y - at.y) * right.y;
+                const ahead = (x - at.x) * -right.y + (y - at.y) * right.x;
+                if (Math.abs(across) < 1 || Math.abs(across) > NEIGHBOUR_DISTANCE || Math.abs(ahead) > NEIGHBOUR_DISTANCE / 2) continue;
+                if (Math.abs(across) < nearest) { nearest = Math.abs(across); side = across > 0 ? -1 : 1; }
+              }
+            }
+          }
+          return side;
+        }
+
+        for (const [index, { style, length, toLayerPoint }] of signLines.entries()) {
+          if (placed.length >= MAX_SIGNS) break;
+          const count = Math.max(1, Math.floor(length / SIGN_SPACING));
+
+          for (let i = 0; i < count; i++) {
+            const along = (length * (i + 0.5)) / count;
+            const at = toLayerPoint(along);
+            // Right-hand normal of the way here (screen y points down).
+            const ahead = toLayerPoint(along + 1);
+            const behind = toLayerPoint(along - 1);
+            const dirLength = Math.hypot(ahead.x - behind.x, ahead.y - behind.y) || 1;
+            const right = { x: -(ahead.y - behind.y) / dirLength, y: (ahead.x - behind.x) / dirLength };
+
+            // A sign on the line itself moves aside if another line runs alongside.
+            const away = style.signs.length === 1 && style.signs[0].side === 0 ? awayFromNeighbour(at, right, index) : 0;
+
+            for (const { info, side: ownSide } of style.signs) {
+              if (!hasSign(info)) continue;
+              const side = ownSide || away;
+              const main = signUnit({
+                label: signLabel(info),
+                kind: info.status === 'variable' ? 'variable'
+                  : (info.lanes ? info.lanes.every((l) => l.advisory) : info.advisory) ? 'advisory' : 'limit',
+                symbol: info.symbol,
+                panels: mainPanels(info),
+                tooltip: signTooltip(info),
+              });
+              // Beside the line (split way or neighbouring line), the sign moves just
+              // far enough along the normal that no part of it reaches the line.
+              const outward = side === 0 ? { x: 1, y: 0 } : { x: right.x * side, y: right.y * side };
+              const offset = side === 0 ? 0 : reach(main.box, { x: -outward.x, y: -outward.y }) + SIGN_CLEARANCE / 2;
+              const x = at.x + outward.x * offset;
+              const y = at.y + outward.y * offset;
+              if (!isFree(main.box, x, y)) continue;
+              place(main.box, x, y);
+              main.group.setAttribute('transform', `translate(${x.toFixed(1)},${y.toFixed(1)})`);
+              signs.append(main.group);
+
+              // Extra signs, each with its panels, next to the main sign: first the
+              // electronic signs (maxspeed:variable) with their reasons, then the
+              // conditional limits. To the right for a sign on the line, outwards (away
+              // from the line) for a sign beside it, so neighbouring signs never run
+              // into each other.
+              let distance = reach(main.box, outward);
+              /** @type {Array<Parameters<typeof signUnit>[0]>} */
+              const extraSpecs = [];
+              if (settings.extras && info.status === 'limit' && info.variable) {
+                const reasons = info.variableReasons.map((r) => PANEL_TEXT[LANG].reasons[/** @type {'weather'} */ (r)] || r);
+                extraSpecs.push({
+                  label: '≈',
+                  kind: 'variable',
+                  // Without a limit (maxspeed=none) the gantries show sign 282 when
+                  // nothing is switched on; the main sign is then the advisory 130.
+                  inner: info.unlimited ? '282' : undefined,
+                  panels: variablePanels(info),
+                  radius: EXTRA_SIGN_RADIUS,
+                  tooltip: [
+                    info.unlimited ? text().variableExtraNone : text().variableExtra(`${signLabel(info)} ${unitLabel()}`),
+                    reasons.join(', '), info.source.split('\n').pop() || '',
+                  ].filter(Boolean).join('\n'),
+                });
+              }
+              const extras = settings.extras ? info.extras.filter((e) => !hiddenKinds.has(e.kind)) : [];
+              for (const extra of extras) {
+                extraSpecs.push({
+                  label: String(shown(extra.kmh)),
+                  kind: 'limit',
+                  panels: conditionPanels(extra),
+                  radius: EXTRA_SIGN_RADIUS,
+                  tooltip: `${shown(extra.kmh)} ${unitLabel()} ${extra.label}${extra.raw !== extra.label ? `\n${extra.raw}` : ''}`,
+                });
+              }
+              for (const spec of extraSpecs) {
+                const unit = signUnit(spec);
+                distance += SIGN_GAP + reach(unit.box, { x: -outward.x, y: -outward.y });
+                const ex = x + outward.x * distance;
+                const ey = y + outward.y * distance;
+                place(unit.box, ex, ey);
+                unit.group.setAttribute('transform', `translate(${ex.toFixed(1)},${ey.toFixed(1)})`);
+                signs.append(unit.group);
+                distance += reach(unit.box, outward);
+              }
+            }
+          }
+        }
+      }
+      signLayer.replaceChildren(signs);
+    }
+
+    // -------------------------------------------------------------------------
+    // Tooltip for the signs
+    // -------------------------------------------------------------------------
+    // Native SVG <title> tooltips do not appear on iD's map (tested 2026-10-23), as
+    // the map handles the mouse itself. So the pointer position is
+    // compared with the signs' screen boxes and a small box of our own is shown.
+
+    const tooltip = document.createElement('div');
+    tooltip.style.cssText = [
+      'position:fixed', 'z-index:1001', 'pointer-events:none', 'white-space:pre-line',
+      'background:rgba(20,20,20,.9)', 'color:#fff', 'font:12px/1.4 system-ui,sans-serif',
+      'padding:4px 6px', 'border-radius:4px', 'max-width:260px', 'overflow-wrap:anywhere',
+    ].join(';');
+    tooltip.hidden = true;
+    /** @type {MouseEvent | null} */
+    let lastPointer = null;
+    let tooltipPending = false;
+
+    function showSignTooltip() {
+      tooltipPending = false;
+      const pointer = lastPointer;
+      let tip = '';
+      if (pointer && signLayer && settings.enabled && settings.signs) {
+        // Last match wins: extra signs are drawn after (on top of) their main sign.
+        for (const sign of signLayer.querySelectorAll('[data-tooltip]')) {
+          const box = sign.getBoundingClientRect();
+          if (pointer.clientX >= box.left && pointer.clientX <= box.right && pointer.clientY >= box.top && pointer.clientY <= box.bottom) {
+            tip = sign.getAttribute('data-tooltip') || '';
+          }
+        }
+      }
+      if (!tip || !pointer) { tooltip.hidden = true; return; }
+      if (!tooltip.isConnected) document.body.append(tooltip);
+      if (tooltip.textContent !== tip) tooltip.textContent = tip;
+      tooltip.hidden = false;
+      tooltip.style.left = `${Math.max(0, Math.min(pointer.clientX + 14, window.innerWidth - tooltip.offsetWidth - 4))}px`;
+      tooltip.style.top = `${Math.max(0, Math.min(pointer.clientY + 14, window.innerHeight - tooltip.offsetHeight - 4))}px`;
+    }
+
+    window.addEventListener('mousemove', (event) => {
+      lastPointer = event;
+      if (tooltipPending) return;
+      tooltipPending = true;
+      requestAnimationFrame(showSignTooltip);
+    }, { passive: true });
+
+    // -------------------------------------------------------------------------
+    // Legend (display only – the controls are in the toolbar popup)
+    // -------------------------------------------------------------------------
+
+    let keepLegendInWindow = () => {};
+    window.addEventListener('resize', () => keepLegendInWindow());
+
+    function updateLegend() {
+      const wanted = settings.enabled && settings.legend;
+      if (!wanted) {
+        if (legend) { legend.remove(); legend = null; }
+        return;
+      }
+      if (legend && legend.isConnected) return;
+      const box = document.createElement('div');
+      legend = box;
+      box.style.cssText = [
+        // Bottom right of the map: iD's sidebar is on the left, its map controls on
+        // the right edge and its footer along the bottom.
+        // max-content: otherwise the box gets narrower at the edge and wraps.
+        'position:fixed', 'right:56px', 'bottom:46px', 'z-index:1000', 'width:max-content',
+        'background:rgba(20,20,20,.85)', 'color:#fff', 'font:12px/1.4 system-ui,sans-serif',
+        'padding:6px 8px', 'border-radius:6px', 'user-select:none', 'pointer-events:auto',
+        // Scrolls instead of leaving the window on small screens
+        // (46 px default distance to the bottom + 10 px margin at the top).
+        'max-height:calc(100vh - 56px)', 'overflow:auto', 'box-sizing:border-box',
+      ].join(';');
+
+      // Header: title (drag handle) and fold button.
+      const header = document.createElement('div');
+      header.style.cssText = 'display:flex;gap:6px;align-items:center;font-weight:600';
+      const handle = document.createElement('span');
+      handle.textContent = `⠿ ${text().legendTitle}`;
+      handle.title = text().drag;
+      handle.style.cssText = 'flex:1;cursor:move;touch-action:none';
+      const fold = document.createElement('button');
+      fold.type = 'button';
+      fold.style.cssText = 'background:none;border:0;color:inherit;font:inherit;cursor:pointer;padding:0 2px;line-height:1';
+      header.append(handle, fold);
+
+      const body = document.createElement('div');
+      body.style.marginTop = '4px';
+
+      /** "Label: value" line at the top. @param {string} label @param {string} value */
+      const addInfo = (label, value) => {
+        const line = document.createElement('div');
+        const name = document.createElement('span');
+        name.style.opacity = '.75';
+        name.textContent = `${label}: `;
+        line.append(name, value);
+        body.append(line);
+      };
+      const vehicle = vehicles.find(([key]) => key === settings.vehicle);
+      addInfo(text().vehicleHeading, vehicle ? `${vehicle[2]} ${LANG === 'en' ? vehicle[4] : vehicle[3]}` : settings.vehicle);
+      addInfo(text().unitHeading, unitLabel());
+
+      /** Section heading with a thin line above. @param {string} title */
+      const addHeading = (title) => {
+        const heading = document.createElement('div');
+        heading.style.cssText = 'font-weight:600;margin-top:6px;padding-top:4px;margin-bottom:2px;border-top:1px solid rgba(255,255,255,.25)';
+        heading.textContent = title;
+        body.append(heading);
+      };
+
+      /**
+       * Row with a line sample and a label. The sample is a span whose CSS draws
+       * the line (border-top), with `background` showing in the gaps of dashes.
+       * @param {HTMLElement} parent
+       * @param {string} swatchCss
+       * @param {string} label
+       */
+      const addSwatchRow = (parent, swatchCss, label) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:6px;align-items:center';
+        const swatch = document.createElement('span');
+        // Light outline so dark colours stay visible on the dark legend.
+        swatch.style.cssText = `width:22px;flex:none;outline:1px solid rgba(255,255,255,.55);outline-offset:1px;${swatchCss}`;
+        row.append(swatch, label);
+        parent.append(row);
+      };
+      /**
+       * @param {HTMLElement} parent
+       * @param {string} color
+       * @param {string} label
+       * @param {'solid'|'dashed'|'dotted'} lineType
+       * @param {string} [background]  Colour in the gaps, e.g. white under red dashes.
+       */
+      const addRow = (parent, color, label, lineType, background = 'transparent') =>
+        addSwatchRow(parent, `height:0;border-top:5px ${lineType} ${color};background:${background}`, label);
+      /** Two-column grid, used for the speed bands and the extra signs. */
+      const addGrid = () => {
+        const grid = document.createElement('div');
+        grid.style.cssText = 'display:grid;grid-template-columns:auto auto;column-gap:10px';
+        body.append(grid);
+        return grid;
+      };
+
+      addHeading(text().speedsHeading);
+      const bands = addGrid();
+      for (const band of colorBands()) addRow(bands, band.color, bandLabel(band), 'solid');
+
+      addHeading(text().distinctionsHeading);
+      addRow(body, COLOR_ADVISORY, text().advisoryOnly, 'dotted', KMH_BANDS[KMH_BANDS.length - 1].color);
+      addRow(body, '#ccc', text().conditionalOnly, 'dashed');
+      // Split way: two colours on top of each other, like the two halves on the map.
+      addSwatchRow(body, `height:0;border-top:3px solid ${KMH_BANDS[9].color};border-bottom:3px solid ${KMH_BANDS[4].color}`, text().split);
+      // Lanes: three thin stripes.
+      addSwatchRow(body, `height:6px;background:linear-gradient(${KMH_BANDS[9].color} 0 33%,${KMH_BANDS[7].color} 33% 67%,${KMH_BANDS[5].color} 67%)`, text().lanes);
+      addRow(body, COLOR_VARIABLE, text().variable, 'dashed', UNDER_VARIABLE);
+      addRow(body, COLOR_MISSING, text().missing, 'dashed', UNDER_MISSING);
+      addRow(body, COLOR_MISSING, text().missingRestricted, 'dashed', UNDER_MISSING_RESTRICTED);
+      addRow(body, '#ffffff', text().noSpeed, 'dashed');
+
+      // Kinds of extra signs, only while they are shown on the map, each with a
+      // sample of the panel it gets on the map. Kinds switched off in the popup are dimmed.
+      if (settings.signs && settings.extras && extraTypes.length) {
+        addHeading(text().extrasHeading);
+        const kinds = addGrid();
+        kinds.style.rowGap = '2px';
+        const hidden = new Set(settings.hiddenExtras);
+        // The panels use the artwork in the map's SVG (<use> works across SVGs of one page).
+        const mapSvg = document.querySelector('.layer-osm')?.closest('svg');
+        if (mapSvg) ensureArt(/** @type {SVGSVGElement} */ (mapSvg));
+        for (const [key, kindIcon, de, en] of extraTypes) {
+          const item = document.createElement('div');
+          item.style.cssText = 'display:flex;gap:6px;align-items:center';
+          const sample = LEGEND_PANEL_SAMPLES[key];
+          const panels = sample === undefined ? [] : sample ? conditionPanels({ raw: sample, icon: '', label: '', kind: key }) : [{ art: '', lines: ['?'] }];
+          if (panels.length) {
+            const g = svgElement('g', {});
+            const { bottom, halfWidth } = addPanels(g, panels, LEGEND_PANEL_RADIUS, -PANEL_GAP);
+            const w = 2 * halfWidth + 2;
+            const svg = svgElement('svg', { width: w, height: bottom + 1, viewBox: `${-w / 2} -0.5 ${w} ${bottom + 1}` });
+            svg.style.flex = 'none';
+            svg.append(g);
+            item.append(svg);
+          } else {
+            item.append(kindIcon);
+          }
+          item.append(LANG === 'en' ? en : de);
+          if (hidden.has(key)) item.style.opacity = '.35';
+          kinds.append(item);
+        }
+        // The electronic-sign extra sign (maxspeed:variable).
+        const item = document.createElement('div');
+        item.style.cssText = 'display:flex;gap:6px;align-items:center';
+        const face = svgElement('svg', { width: 16, height: 16, viewBox: '-8 -8 16 16' });
+        face.style.flex = 'none';
+        drawSignFace(face, '≈', 'variable', 7, 7);
+        item.append(face, text().variableExtraLegend);
+        kinds.append(item);
+      }
+
+      const hint = document.createElement('div');
+      hint.style.cssText = 'opacity:.8;font-size:11px;margin-top:4px;max-width:220px';
+      hint.textContent = text().hint;
+      body.append(hint);
+
+      // Folding only hides the legend body; colouring stays on.
+      const showFoldState = () => {
+        body.hidden = legendState.collapsed;
+        fold.textContent = legendState.collapsed ? '▸' : '▾';
+        fold.title = legendState.collapsed ? text().expand : text().collapse;
+      };
+      showFoldState();
+      fold.addEventListener('click', () => {
+        legendState.collapsed = !legendState.collapsed;
+        showFoldState();
+        saveLegendState();
+        keepLegendInWindow();
+      });
+
+      box.append(header, body);
+      document.body.append(box);
+
+      // Dragging by the title. The whole box always stays inside the window.
+      /** @param {number} x @param {number} y */
+      const moveTo = (x, y) => {
+        const maxX = window.innerWidth - box.offsetWidth;
+        const maxY = window.innerHeight - box.offsetHeight;
+        box.style.left = `${Math.max(0, Math.min(x, maxX))}px`;
+        box.style.top = `${Math.max(0, Math.min(y, maxY))}px`;
+        box.style.right = 'auto';
+        box.style.bottom = 'auto';
+      };
+      keepLegendInWindow = () => { if (legendState.pos) moveTo(legendState.pos.x, legendState.pos.y); };
+      keepLegendInWindow();
+
+      handle.addEventListener('pointerdown', (down) => {
+        down.preventDefault();
+        const start = box.getBoundingClientRect();
+        const dx = down.clientX - start.left;
+        const dy = down.clientY - start.top;
+        handle.setPointerCapture(down.pointerId);
+        const onMove = (/** @type {PointerEvent} */ move) => moveTo(move.clientX - dx, move.clientY - dy);
+        const onUp = () => {
+          handle.removeEventListener('pointermove', onMove);
+          handle.removeEventListener('pointerup', onUp);
+          const end = box.getBoundingClientRect();
+          legendState.pos = { x: Math.round(end.left), y: Math.round(end.top) };
+          saveLegendState();
+        };
+        handle.addEventListener('pointermove', onMove);
+        handle.addEventListener('pointerup', onUp);
+      });
+    }
+
+    // Redraw whenever the map changes. 'd' is watched too: when the map is moved,
+    // iD only changes the path geometry, and the signs have to follow.
+    // Our own updates are ignored, otherwise the layers would redraw forever.
+    new MutationObserver((records) => {
+      const ours = (/** @type {Node} */ node) => !!(signLayer?.contains(node) || overlayLayer?.contains(node) || tooltip.contains(node) || legend?.contains(node));
+      if (records.some((r) => !ours(r.target))) scheduleRedraw();
+    }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['d'] });
+    scheduleRedraw();
+  }
+
+  // ===========================================================================
+  // Official sign artwork
+  // ===========================================================================
+  // German traffic signs from Wikimedia Commons (public domain as official works,
+  // § 5 UrhG), optimised with svgo. Keys are the sign numbers; "snow" is the symbol
+  // "Schnee- oder Eisglätte". Sources: dev/signs/*.svg. After changing them, run
+  // `node dev/build-signs.js`, which rewrites the block between the markers.
+  // BEGIN GENERATED SIGN ART
+  /** @type {Record<string, { width: number, height: number, svg: string }>} */
+  const SIGN_ART = {
+    "1010-51": { width: 600, height: 330, svg: "<defs><clipPath id=\"omc-1010-51-a\" clipPathUnits=\"userSpaceOnUse\"><path d=\"M0 0h480v264H0z\"/></clipPath><clipPath id=\"omc-1010-51-b\" clipPathUnits=\"userSpaceOnUse\"><path d=\"M477 264h3V0h-3z\"/></clipPath><clipPath id=\"omc-1010-51-c\" clipPathUnits=\"userSpaceOnUse\"><path d=\"M444 0h36v264h-36z\"/></clipPath></defs><g clip-path=\"url(#omc-1010-51-a)\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"><path d=\"M32 263.8A32 32 0 0 1 .2 232V32A32 32 0 0 1 32 .2h416A32 32 0 0 1 479.8 32v200a32 32 0 0 1-31.8 31.8\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\"/><path d=\"M32 .5A31.5 31.5 0 0 0 .5 32v200A31.5 31.5 0 0 0 32 263.5h416a31.5 31.5 0 0 0 31.5-31.5V32A31.5 31.5 0 0 0 448 .5zM448 264H32a32 32 0 0 1-32-32V32A32 32 0 0 1 32 0h416a32 32 0 0 1 32 32v200a32 32 0 0 1-32 32\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\"/></g><path d=\"M32 20h416a12 12 0 0 1 12 12v200a12 12 0 0 1-12 12H32a12 12 0 0 1-12-12V32a12 12 0 0 1 12-12m0-12A24 24 0 0 0 8 32v200a24 24 0 0 0 24 24h416a24 24 0 0 0 24-24V32a24 24 0 0 0-24-24\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><path d=\"M185.5 204V102.2h210.9V204zm-14.6-25.5-63-3.9c-2.9-.2-5.4-2-6.4-4.7l-16-42.8a29 29 0 0 1-1.9-10.2V76.7c0-4 3.3-7.3 7.3-7.3h3.6a32.7 32.7 0 1 0 65.5 0h131c0 10 4.4 19.3 12 25.5H171zm-25.4-12.7v-36.3l-48.3-5.7h-.4a3.6 3.6 0 0 0-3.4 4.9l12.1 32.5a4 4 0 0 0 3.2 2.3zM127.3 95a25.4 25.4 0 1 1 0-50.9 25.4 25.4 0 0 1 0 50.9m196.3 0a25.5 25.5 0 1 1 0-51 25.5 25.5 0 0 1 0 51m20.6 0a33 33 0 0 0 12.2-25.5h18.1l21.9 7.3V95z\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><g clip-path=\"url(#omc-1010-51-b)\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"><g clip-path=\"url(#omc-1010-51-c)\"><path d=\"M476.8 530.5v11.3m-8.5-19.8H457m615 8.5v11.3m8.6-19.8h11.3M476.8-328.4v-11.4m-8.5 19.9H457m615-8.5v-11.4m8.6 19.9h11.3\" style=\"fill:none;stroke:#fff;stroke-width:.5;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:10;stroke-dasharray:none;stroke-opacity:1\"/><path d=\"M476.8 530.5v11.3m-8.5-19.8H457m615 8.5v11.3m8.6-19.8h11.3M476.8-328.4v-11.4m-8.5 19.9H457m615-8.5v-11.4m8.6 19.9h11.3\" style=\"fill:none;stroke:#000;stroke-width:.25;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:10;stroke-dasharray:none;stroke-opacity:1\"/><path d=\"M750.4 542.5h48m-48-883h48M456.3 125V77m636.3 48V77M774.4 554.5v-24m0-859v-24M444.3 101h24m612.3 0h24M774.4 542.5h6a6 6 0 1 0-12 0 6 6 0 0 0 12 0m-6-883h6a6 6 0 1 0-12 0 6 6 0 0 0 12 0M456.3 101h6a6 6 0 1 0-12 0 6 6 0 0 0 12 0m630.3 0h6a6 6 0 1 0-12 0 6 6 0 0 0 12 0\" style=\"fill:none;stroke:#fff;stroke-width:.5;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:10;stroke-dasharray:none;stroke-opacity:1\"/><path d=\"M750.4 542.5h48m-48-883h48M456.3 125V77m636.3 48V77M774.4 554.5v-24m0-859v-24M444.3 101h24m612.3 0h24M774.4 542.5h6a6 6 0 1 0-12 0 6 6 0 0 0 12 0m-6-883h6a6 6 0 1 0-12 0 6 6 0 0 0 12 0M456.3 101h6a6 6 0 1 0-12 0 6 6 0 0 0 12 0m630.3 0h6a6 6 0 1 0-12 0 6 6 0 0 0 12 0\" style=\"fill:none;stroke:#000;stroke-width:.25;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:10;stroke-dasharray:none;stroke-opacity:1\"/></g></g>" },
+    "1010-57": { width: 600, height: 330, svg: "<defs><clipPath id=\"omc-1010-57-a\" clipPathUnits=\"userSpaceOnUse\"><path d=\"M0 0h480v264H0z\"/></clipPath></defs><g clip-path=\"url(#omc-1010-57-a)\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"><path d=\"M32 263.8A32 32 0 0 1 .2 232V32A32 32 0 0 1 32 .2h416A32 32 0 0 1 479.8 32v200a32 32 0 0 1-31.8 31.8\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\"/><path d=\"M32 .5A31.5 31.5 0 0 0 .5 32v200A31.5 31.5 0 0 0 32 263.5h416a31.5 31.5 0 0 0 31.5-31.5V32A31.5 31.5 0 0 0 448 .5zM448 264H32a32 32 0 0 1-32-32V32A32 32 0 0 1 32 0h416a32 32 0 0 1 32 32v200a32 32 0 0 1-32 32\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\"/></g><path d=\"M32 20h416a12 12 0 0 1 12 12v200a12 12 0 0 1-12 12H32a12 12 0 0 1-12-12V32a12 12 0 0 1 12-12m0-12A24 24 0 0 0 8 32v200a24 24 0 0 0 24 24h416a24 24 0 0 0 24-24V32a24 24 0 0 0-24-24\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><path d=\"m78.5 189-.2 11c.2.8.4 1.6 1.4 1.6l311.7.2c14.2-2.8 17-39.6 24.3-60.2V97.1c-3.6-8.4-7.4-9-11.3-10.5L358 87c0 40.5-61.4 40.2-61.4 0H172c0 40.3-60 40.3-60 0H69c-2 .6-3.4 2.5-4.7 4.7l.5 39.9 18.3 52.6c.6 3.5-3 3.3-4.6 4.9\" style=\"fill:#000;fill-opacity:1;fill-rule:evenodd;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><path d=\"M351.8 86.8a24.5 24.5 0 1 0-48.9 0 24.5 24.5 0 0 0 49 0M166.7 86.7a24.5 24.5 0 1 0-49 0 24.5 24.5 0 0 0 49 0\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><path d=\"m340.5 181.7 10.8-36.7c.6-1.5 1.2-3 3-3.6h37.3c1.5 1.4 3 2.6 3.2 5.3l-10.5 36.6c-.9 3-2 3.7-3.3 4.2h-38q-2.7-1.8-2.5-5.8M287 181.8l10.7-36.7c.6-1.5 1.3-3 3-3.6H338c1.5 1.3 3 2.6 3.3 5.2l-10.6 36.7c-.9 2.9-2 3.7-3.3 4.2h-38q-2.7-1.8-2.5-5.8M233.8 181.8l10.8-36.7c.6-1.5 1.2-3 3-3.6h37.3c1.4 1.3 3 2.6 3.2 5.2l-10.6 36.7c-.8 2.9-2 3.7-3.2 4.2h-38q-2.8-1.8-2.5-5.8M181 181.8l10.7-36.7c.7-1.5 1.3-3 3-3.6H232c1.5 1.3 3 2.6 3.3 5.2l-10.6 36.7c-.9 2.9-2 3.7-3.3 4.2h-38q-2.6-1.8-2.4-5.8M136.6 184.3V145a6 6 0 0 1 3.5-3.6l38.7.2c1.5 1.3 3 2.5 3.3 5.2l-10.6 36.6c-.9 3-2 3.7-3.3 4.2h-28.7c-1.9-1-2.3-1-3-3.2M127.3 183.1V145c-.7-1.5-1.3-3-3-3.7l-44 .3c-1.4 1.2-3 2.5-3.2 5.1l13.2 36.6c.8 2.9 2 3.7 3.3 4.2l31.3-.1c1.8-1.1 2.5-1.7 2.4-4.3\" style=\"fill:#fff;fill-opacity:1;fill-rule:evenodd;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/>" },
+    "1010-59": { width: 600, height: 330, svg: "<defs><clipPath id=\"omc-1010-59-a\" clipPathUnits=\"userSpaceOnUse\"><path d=\"M0 0h480v264H0z\"/></clipPath></defs><g clip-path=\"url(#omc-1010-59-a)\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"><path d=\"M32 263.8A32 32 0 0 1 .2 232V32A32 32 0 0 1 32 .2h416A32 32 0 0 1 479.8 32v200a32 32 0 0 1-31.8 31.8\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\"/><path d=\"M32 .5A31.5 31.5 0 0 0 .5 32v200A31.5 31.5 0 0 0 32 263.5h416a31.5 31.5 0 0 0 31.5-31.5V32A31.5 31.5 0 0 0 448 .5zM448 264H32a32 32 0 0 1-32-32V32A32 32 0 0 1 32 0h416a32 32 0 0 1 32 32v200a32 32 0 0 1-32 32\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\"/></g><path d=\"M32 20h416a12 12 0 0 1 12 12v200a12 12 0 0 1-12 12H32a12 12 0 0 1-12-12V32a12 12 0 0 1 12-12m0-12A24 24 0 0 0 8 32v200a24 24 0 0 0 24 24h416a24 24 0 0 0 24-24V32a24 24 0 0 0-24-24\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><path d=\"M100 101a21.2 21.2 0 1 0-42.4 0 21.2 21.2 0 0 0 42.4 0\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><path d=\"M146.5 182c1.2 1.3 2.5 2.4 4.8 2.3h102.8l51-40.5q.9-1.7 1-3l.2-35.8c-1-2-2-3.8-4-4h-12c0 35-51.8 35.2-51.8 0H105c0 35-52.3 35-52.3 0H38.3c-1.2.6-2.3 0-4 4.2l-.1 25.8c.8 2.3 1.9 3.2 3 4.1l75 12.5z\" style=\"fill:#000;fill-opacity:1;fill-rule:evenodd;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><path d=\"M285.4 101a21.2 21.2 0 1 0-42.4 0 21.2 21.2 0 0 0 42.4 0\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><path d=\"m266.5 150.4-21.9 22c-.6.5-1 1.2-2 1h-38.3v-30.8h65.2c3.1.6-1 4.7-3 7.8\" style=\"fill:#fff;fill-opacity:1;fill-rule:evenodd;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><path d=\"M365 111.7h-33.5v-5.4h-20.7v-5.6h52.5c.4 3.7.2 7.5 1.7 11\" style=\"fill:#000;fill-opacity:1;fill-rule:evenodd;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><path d=\"m122.7 147.2 25.6 25.3q.7 1 2 1h45.5v-31h-71.1c-2.7 1.1-3.1 2.7-2 4.7\" style=\"fill:#fff;fill-opacity:1;fill-rule:evenodd;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><path d=\"M410.2 101a21.2 21.2 0 1 0-42.5 0 21.2 21.2 0 0 0 42.5 0\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><path d=\"M331.6 116.4v48.2c1 7.5 4.9 8.2 8.4 9.3h98.2c2.6-.7 6-1.3 7.6-8.7v-48.8h-36.3c-7.5 15.3-33.3 15.4-41.2 0zM445.8 111.7l-5.3-11h-26c-.7 3.7-.7 7.5-2.7 11z\" style=\"fill:#000;fill-opacity:1;fill-rule:evenodd;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/>" },
+    "1012-50": { width: 600, height: 330, svg: "<defs><clipPath id=\"omc-1012-50-a\" clipPathUnits=\"userSpaceOnUse\"><path d=\"M0 0h480v264H0z\"/></clipPath></defs><g clip-path=\"url(#omc-1012-50-a)\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"><path d=\"M32 263.8A32 32 0 0 1 .2 232V32A32 32 0 0 1 32 .2h416A32 32 0 0 1 479.8 32v200a32 32 0 0 1-31.8 31.8\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\"/><path d=\"M32 .5A31.5 31.5 0 0 0 .5 32v200A31.5 31.5 0 0 0 32 263.5h416a31.5 31.5 0 0 0 31.5-31.5V32A31.5 31.5 0 0 0 448 .5zM448 264H32a32 32 0 0 1-32-32V32A32 32 0 0 1 32 0h416a32 32 0 0 1 32 32v200a32 32 0 0 1-32 32\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\"/></g><path d=\"M32 20h416a12 12 0 0 1 12 12v200a12 12 0 0 1-12 12H32a12 12 0 0 1-12-12V32a12 12 0 0 1 12-12m0-12A24 24 0 0 0 8 32v200a24 24 0 0 0 24 24h416a24 24 0 0 0 24-24V32a24 24 0 0 0-24-24\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/><path d=\"M126.4 114.3c0 7-2.2 13-6.7 16.9-3.5 3.1-7.8 5-15.5 6.1l-9.4 1.4c-3.8.6-7.2 2-9.3 3.9a10 10 0 0 0-3 7.6c0 7.3 5.2 12.9 15 12.9 7 0 12.9-1.5 18-6.4l8 7.9c-7 6.6-14.7 9.4-25.7 9.4-17.1 0-27.6-9.9-27.6-24.2q0-10.2 6-15.8 5.6-5.2 15.7-6.6l9.8-1.4c4.8-.7 7-1.5 9-3.5q3.3-3.1 3.3-8.6c0-8-6.3-12.6-17-12.6-8.6 0-15.2 1.8-21.2 7.8l-8.4-8.2c8-8 16.9-10.9 29.3-10.9 17.3 0 29.7 9 29.7 24.3M184.6 98.4l-8.1 7.7c-3.7-4-6.6-5.5-11.3-5.5q-6.9 0-10.9 5.2c-2.5 3.2-3.5 7.5-3.5 14.4 0 6.8 1 11 3.5 14.2q4 5.2 11 5.3c4.6 0 7.5-1.6 11.2-5.6l8.1 7.9c-5.6 5.9-11.3 8.2-19.4 8.2-13.2 0-26.2-8-26.2-30S152 90 165.2 90c8.1 0 13.8 2.4 19.4 8.4M245.7 90.7v38c0 12.7-7.3 21.5-20.4 21.5-5.8 0-11.2-2.2-15.2-6.6v29.7h-11.9V90.7h11.9v36c0 8.9 5.3 13 11.9 13s11.8-4 11.8-13v-36zM310.8 90.7v58.8H299v-35.8c0-9-5.6-13.1-12.2-13.1s-11.8 3.9-11.8 13v36H263v-37.7c0-6.6 1.4-12.2 6-16.6q5.2-5.1 14.5-5.3a21 21 0 0 1 15.6 6.6v-6zM352.7 90.7v10h-5.2c-4.7 0-6.4 2.4-6.4 7v65.6h-11.8V107c0-8.7 4.9-16.2 16.1-16.2zM412.6 116.7v5.2c0 16.7-9.2 28.3-25 28.3-15 0-25-11-25-30 0-22.4 11.8-30.2 26.5-30.2 10.3 0 16 3.1 22 9.2l-7.5 7c-4.2-4.1-7.6-6-14.2-6-9.7 0-15 6.4-15 16.5zm-11.8 8.2h-26.4c.1 3.6.3 5.4 1.5 8 1.9 4.4 6.1 7.5 11.7 7.5s9.8-3 11.6-7.5c1.2-2.6 1.5-4.4 1.6-8\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 330)\"/>" },
+    "1053-33": { width: 421, height: 232, svg: "<path d=\"M22.7 185.2C10.4 185.2.4 175.2.4 163V22.6C.4 10.3 10.4.4 22.7.4H314c12.3 0 22.3 10 22.3 22.2V163c0 12.3-10 22.2-22.3 22.2z\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 232)\"/><path d=\"M22.7 185.6A22.6 22.6 0 0 1 0 163V22.6A22.6 22.6 0 0 1 22.7 0H314a22.6 22.6 0 0 1 22.7 22.6V163a22.6 22.6 0 0 1-22.7 22.6zm0-.4H314c12.3 0 22.3-10 22.3-22.2V22.6c0-12.3-10-22.2-22.3-22.2H22.7C10.4.4.4 10.4.4 22.6V163c0 12.3 10 22.2 22.3 22.2\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 232)\"/><path d=\"M22.6 14.1h291.5c4.7 0 8.5 3.8 8.5 8.4v140.6c0 4.6-3.8 8.4-8.5 8.4H22.6a8.4 8.4 0 0 1-8.4-8.4V22.5c0-4.6 3.8-8.4 8.4-8.4m.4-8C13.8 6.1 6.2 13.6 6.2 23v139.8c0 9.3 7.6 16.8 16.8 16.8h290.8c9.3 0 16.8-7.5 16.8-16.8V22.9c0-9.3-7.5-16.8-16.8-16.8\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 232)\"/><path d=\"M261.6 49H253c-8.7 0-15.8 7.1-15.8 15.8v42.9h-7V119h7v21h14v-21h10.5v-11.4h-10.5V66.6c0-2.5 2-4.4 4.4-4.4h6.1zm-99.4 36.5v42h42v-11.2h-31.5V98.6a20.3 20.3 0 0 0 33-16V70.9a22.4 22.4 0 0 0-44.8-2.1h11.3a11.2 11.2 0 0 1 22.2 2v9.9a11.2 11.2 0 0 1-21.2 4.9zm-31-47v24.6h14V49zm-49 10.6 33.2 84H89.2v-14h-14v28h56v-13.2L97.9 49.1\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 232)\"/>" },
+    "1053-35": { width: 601, height: 601, svg: "<path d=\"M32.2 480.4A32 32 0 0 1 .4 448.6V32.2A32 32 0 0 1 32.2.4h416.4a32 32 0 0 1 31.8 31.8v416.4a32 32 0 0 1-31.8 31.8z\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 601)\"/><path d=\"M32.2 480.8A32 32 0 0 1 0 448.6V32.2A32 32 0 0 1 32.2 0h416.4a32 32 0 0 1 32.2 32.2v416.4a32 32 0 0 1-32.2 32.2zm0-.4h416.4a32 32 0 0 0 31.8-31.8V32.2A32 32 0 0 0 448.6.4H32.2A32 32 0 0 0 .4 32.2v416.4a32 32 0 0 0 31.8 31.8\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 601)\"/><path d=\"M32.2 472.6a24 24 0 0 1-24-24V32.2a24 24 0 0 1 24-24h416.4a24 24 0 0 1 24 24v416.4a24 24 0 0 1-24 24zm0-12h416.4a12 12 0 0 0 12-12V32.2a12 12 0 0 0-12-12H32.2a12 12 0 0 0-12 12v416.4a12 12 0 0 0 12 12\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 601)\"/><path d=\"M80.2 62v12l5.4 2.3a47 47 0 0 0 35.8 0l10.7-4.5a47 47 0 0 1 35.8 0l10.8 4.5a47 47 0 0 0 35.8 0l10.7-4.5a47 47 0 0 1 35.8 0l10.7 4.5a47 47 0 0 0 35.8 0l10.7-4.5a47 47 0 0 1 35.8 0l10.8 4.5a47 47 0 0 0 35.8 0v-12a47 47 0 0 1-35.8 0L354 59.8a47 47 0 0 0-35.8 0l-10.7 4.5a47 47 0 0 1-35.8 0L261 59.8a47 47 0 0 0-35.8 0l-10.7 4.5a47 47 0 0 1-35.8 0l-10.8-4.5a47 47 0 0 0-35.8 0l-10.7 4.5a47 47 0 0 1-35.8 0\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 601)\"/><path d=\"M80.2 86v12l5.4 2.3a47 47 0 0 0 35.8 0l10.7-4.5a47 47 0 0 1 35.8 0l10.8 4.5a47 47 0 0 0 35.8 0l10.7-4.5a47 47 0 0 1 35.8 0l10.7 4.5a47 47 0 0 0 35.8 0l10.7-4.5a47 47 0 0 1 35.8 0l10.8 4.5a47 47 0 0 0 35.8 0v-12a47 47 0 0 1-35.8 0L354 83.8a47 47 0 0 0-35.8 0l-10.7 4.5a47 47 0 0 1-35.8 0L261 83.8a47 47 0 0 0-35.8 0l-10.7 4.5a47 47 0 0 1-35.8 0l-10.8-4.5a47 47 0 0 0-35.8 0l-10.7 4.5a47 47 0 0 1-35.8 0M168 292.4a15 15 0 0 1-13.7-9l-23.8-54.6a55 55 0 0 0-6.3-10.9l-3.6-4.8a18 18 0 0 1-3.6-10.8v-39a15 15 0 0 1 15-15h222.1a15 15 0 0 1 15 15v39a18 18 0 0 1-3.5 10.8L362 218q-3.9 5-6.4 10.9L332 283.3a15 15 0 0 1-13.8 9zm3.7-15h142.8a6 6 0 0 0 5.5-3.7l20.6-47.4h-195l20.6 47.4a6 6 0 0 0 5.5 3.7\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 601)\"/><path d=\"M132 142.3h36v-33c0-5-4-9-9-9h-18c-5 0-9 4-9 9M318.1 142.3h36v-33c0-5-4-9-9-9h-18c-5 0-9 4-9 9M278 433.3h-6.4v6.5h6.4zm0-38.4h-6.4v32h6.4zm-35.2 19.2h13.6a6.8 6.8 0 0 1-13.6 0m20-5.6h-20v-.8c0-2.8 1.7-5.3 4.3-6.3a9 9 0 0 1 10.1 2.5l4.9-4.2c-4.3-5-11.3-6.7-17.4-4.2-5 2-8.3 6.8-8.3 12.2v6.4a13.2 13.2 0 0 0 26.4 0zm-53.6-1.2a6.4 6.4 0 0 1 12.8 0v7.2a6.4 6.4 0 1 1-12.8 0zm-6.4-12.4v44.9h6.4v-16.5a10.8 10.8 0 0 0 19.2-6.8v-11.2a10.8 10.8 0 0 0-19.2-6.8V395M328.5 343.7h18.7a9.4 9.4 0 0 1-18.7 0m27.5-7.8h-27.5v-1c0-3.9 2.3-7.3 5.9-8.7 4.9-2 10.5-.6 14 3.4l6.6-5.8A21 21 0 0 0 331 318a18 18 0 0 0-11.4 16.8v8.9a18.2 18.2 0 1 0 36.3 0zm-83.7-11.6 6.2 6.2a19 19 0 0 1 19.6-4.2c2.3.9 3.4 3.4 2.6 5.7a4 4 0 0 1-3.9 2.8l-9.3.6a13.2 13.2 0 0 0-2.3 26c8.2 2 16.9.1 23.5-5.2l-5.5-6.8a19 19 0 0 1-16 3.5 4.4 4.4 0 0 1 .8-8.7l9.4-.6a13.2 13.2 0 0 0 3.8-25.5 27 27 0 0 0-28.9 6.2m-45.1 0 6.2 6.2a19 19 0 0 1 19.6-4.2c2.2.9 3.4 3.4 2.5 5.7a4 4 0 0 1-3.8 2.8l-9.4.6a13.2 13.2 0 0 0-2.2 26c8.2 2 16.8.1 23.4-5.2l-5.5-6.8a19 19 0 0 1-15.9 3.5 4.4 4.4 0 0 1 .8-8.7l9.3-.6a13.2 13.2 0 0 0 3.9-25.5 27 27 0 0 0-29 6.2M212.9 370H204v8.8h8.8zm-17.6 0h-8.9v8.8h8.9zm13.2-33.6h-12.7a5.5 5.5 0 1 1 0-11h7.2c3 0 5.5 2.5 5.5 5.5zm8.8-19.3h-8.8v4.6a9 9 0 0 0-7.7-4.6h-5.5a13.2 13.2 0 1 0 0 26.5h13.2v4.4a5 5 0 0 1-4.1 4.8 27 27 0 0 1-9.5 0 5 5 0 0 1-3.5-2.6l-7 5.5q3.3 4.7 9 5.8 6.3 1 12.5 0a14 14 0 0 0 11.4-13.5zm-92.5 0V379h8.8l28-44v44h9.4v-61.7h-8.8l-28 44v-44\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 601)\"/>" },
+    "242.1": { width: 600, height: 600, svg: "<path d=\"M28.5 449.8C.2 449.8.2 421.5.2 421.5v-393S.2.2 28.5.2h393c28.3 0 28.3 28.3 28.3 28.3v393s0 28.3-28.3 28.3z\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.33333 0 0 -1.33333 0 600)\"/><path d=\"M28 442.4C7.5 442.4 7.6 422 7.6 422V28S7.7 7.6 28 7.6h394.2c20.3 0 20.2 20.3 20.2 20.3V422s0 20.3-20.2 20.3zm0-11.3h394s9-.3 9-9V28c0-8.7-9-9-9-9H28s-9 .3-9 9V422c0 8.7 9 9 9 9\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.33333 0 0 -1.33333 0 600)\"/><path d=\"M28.5 450c-14.2 0-21.4-7.1-25-14.3-3.5-7-3.5-14.2-3.5-14.2v-393s0-7.1 3.5-14.2C7.1 7 14.3 0 28.5 0h393c14.2 0 21.4 7.1 25 14.3 3.5 7 3.5 14.2 3.5 14.2v393s0 7.1-3.5 14.2c-3.6 7.2-10.8 14.3-25 14.3Zm0-.2h393c28.3 0 28.3-28.3 28.3-28.3v-393S449.8.2 421.5.2h-393C.2.2.2 28.5.2 28.5v393s0 28.3 28.3 28.3\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.33333 0 0 -1.33333 0 600)\"/><path d=\"M288.7 45.8v63h40.5v-9h-31v-18h26.5v-8.4h-26.4V54.8h31v-9zm-62 0v63h9l28.8-45v45h9.6v-63h-9l-28.8 45v-45Zm-47.8 22a13 13 0 1 1 25.9 0v19.1a13 13 0 0 1-25.9 0zm-9.6 0v19.1a22.5 22.5 0 0 0 45 0V67.8a22.5 22.5 0 0 0-45 0m-49.5-22v7.9l28.7 46.7h-27.6v8.5h39.4v-7.3l-28.7-46.8h28.7v-9\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.33333 0 0 -1.33333 0 600)\"/><path d=\"M359.6 269.9a135 135 0 1 0-270 0 135 135 0 0 0 270 0\" style=\"fill:#154889;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.33333 0 0 -1.33333 0 600)\"/><path d=\"M274.6 276a14.3 14.3 0 1 1-28.6 0 14.3 14.3 0 0 1 28.6 0m-69.3 83.5a16.3 16.3 0 1 0-32.6 0 16.3 16.3 0 0 0 32.6 0m-32.6-83.1 2.8 2.8a4 4 0 0 1 1.2 2.9v30.6c0 1-.9 2-2 2a2 2 0 0 1-2-2zM148.2 229a83 83 0 0 0 19.5 42.1c-4.7 5.2-7.3 12-7.3 19v16.3a28.5 28.5 0 0 0 53.9 13.2l17-32.5a12 12 0 0 0-2.2-14.3l16.8-14a22 22 0 0 1 20.6-4.5l3 .9c3.1.9 6.5-.2 8.5-2.7l20.8-25.2c3.5-4.3 3-10.6-1.3-14.2l-18.8 22 6-30.6-7.7-1.1 4.7-29.7a5.1 5.1 0 0 0-10-1.7l-5.9 29.7-6.6-1-3-32.3a5 5 0 0 0-10.1.8l4 70-29 27.4c-2.7 3.8-2.5 9 .5 12.5l-18 34.7q-.7 1-1.7.6-.7-.4-.7-1.1V282a4 4 0 0 1 1.2-3l3.6-3.5a82 82 0 0 0 23.7-46.5zm42.8-4h12.2V170a6.1 6.1 0 1 0-12.2 0zm-16.3 0H187v-42.9a6.1 6.1 0 0 0-12.2 0\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.33333 0 0 -1.33333 0 600)\"/>" },
+    "244.1": { width: 600, height: 600, svg: "<path d=\"M30.4 479.8C.2 479.8.2 449.6.2 449.6V30.4S.2.2 30.4.2h419.2c30.2 0 30.2 30.2 30.2 30.2v419.2s0 30.2-30.2 30.2z\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/><path d=\"M29.8 471.9c-21.7 0-21.6-21.6-21.6-21.6V29.7s0-21.6 21.6-21.5h420.4c21.7 0 21.6 21.5 21.6 21.5v420.6s0 21.6-21.6 21.6zm0-12h420.4s9.6-.4 9.6-9.6V29.7c0-9.2-9.6-9.6-9.6-9.6H29.8s-9.6.4-9.6 9.6v420.6c0 9.2 9.6 9.6 9.6 9.6\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/><path d=\"M30.4 480c-15.2 0-22.8-7.6-26.6-15.2S0 449.6 0 449.6V30.4s0-7.6 3.8-15.2S15.2 0 30.4 0h419.2c15.2 0 22.8 7.6 26.6 15.2s3.8 15.2 3.8 15.2v419.2s0 7.6-3.8 15.2-11.4 15.2-26.6 15.2zm0-.2h419.2c30.2 0 30.2-30.2 30.2-30.2V30.4S479.8.2 449.6.2H30.4C.2.2.2 30.4.2 30.4v419.2s0 30.2 30.2 30.2\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/><path d=\"M41.5 49v44.6h28.8v-6.4h-22V74.1h18.8v-6H48.3V48.9zm56.7 0h-6.4v3.2l-.1-.3-.5-.7-.5-.5-.6-.5-.6-.4-.7-.4-.7-.2-.8-.2h-6.9l-1.1.3-1.2.5-1 .6-1 .7-.9.8-.7 1-.6 1-.6 1L73 56l-.2 1.2-.1 1.2v1.3l.3 1.2.3 1 .6 1.2.6 1 .7 1 1 .7.9.7 1 .7 1.2.4 1.1.3 1.2.2h10.2v3.8l-.1.4-.2.4-.2.3-.2.4-.2.4-.4.2-.3.2-.4.3-.4.1-.4.1H89l-1 .3h-5l-.8-.2h-.3l-.4-.2-.4-.1-.3-.3-.4-.2-.2-.3-.4-.3-.2-.4V73l-5.1 4 .3.4.8.9.8.8 1 .6 1 .6 1 .4 1 .4.6.1 1.2.2 2.2.1h2.2l2.4-.1 1-.2.6-.1 1.2-.4 1-.4 1-.6 1-.7.8-.8.7-.9.7-1 .5-1 .4-1 .3-1.3.1-1zm-6.4 13.9V58l-.1-.5-.2-.4-.2-.4-.4-.4-.3-.4-.3-.3-.4-.2-.4-.3-1-.3H82l-.5.2-.5.1-.4.3-.8.6-.3.4-.2.4-.3.5-.1.5-.1.5v1.5l.2.5.3.4.2.5.7.7.4.2.4.3.5.2h.5l.5.2zm16-14v44.7h6.4V77.2l.4.5 1 .9 1 .8 1 .6 1.1.6 1.3.3 1.2.2 1.2.1h1.3l1.3-.2 1.2-.4 1.1-.4 1.1-.7 1-.8 1-.8.8-1 .7-1 .6-1.2.4-1.1.3-1.3.1-1.2.1-.6V48.9H127v20l-.2.8-.1.8-.3.7-.4.7-.5.7-.5.5-.6.5-.8.5-.7.3-.7.2-.8.2h-1.6l-.8-.2-.7-.2-.7-.3-.8-.5-.6-.5-.5-.5-.5-.7-.4-.7-.3-.7-.2-.8-.1-.8v-20zm35.2 0v32h6.4v-3.7l.4.5.8.9 1 .7 1 .6 1 .6 1.2.3 1.2.3 1.2.1h1.2l1.2-.2 1.2-.2 1.1-.4 1.2-.6 1-.6.4-.4-4.5-5.6-.3.3-.6.4-.7.4-.7.3-.8.1h-2.3l-.7-.1-.8-.3-.7-.4-.5-.4-.7-.6-.5-.5-.5-.7-.3-.6-.2-.7-.3-.8V48.9zm26.3 0v32h6.4v-3.7l.4.5 1 .9.8.7 1 .6 1.2.6 1 .3 1.3.3 1.2.1h1.2l1.2-.2 1.2-.2 1.1-.4 1.1-.6 1-.6.5-.4-4.5-5.6-.3.3-.7.4-.6.4-.7.3-.8.1h-2.4l-.7-.1-.7-.3-.7-.4-.6-.4-.6-.6-.5-.5-.5-.7-.3-.6-.2-.7-.3-.8V48.9zm50.3 0h-6.3v3.3l-.2-.3-.4-.7-.6-.5-.5-.5-.7-.4-.6-.4-.8-.2-.7-.2H202l-1.2.3-1 .5-1.1.6-1 .7-.9.8-.8 1-.6 1-.5 1-.4 1.1-.2 1.2-.1 1.2v1.3l.3 1.2.4 1 .5 1.2.6 1 .8 1 1 .7.9.7 1 .7 1.1.4 1.2.3 1.2.2h10.2v3.8l-.1.4-.2.4-.3.3-.1.4-.3.4-.7.4-.3.3-.4.1-.4.1h-.2l-.8.3h-5.2l-.8-.2h-.2l-.4-.2-.4-.1-.4-.3-.3-.2-.3-.3-.3-.3-.2-.4-.1-.1-5 4 .3.4.7.9.9.8.8.6 1 .6 1.1.4 1 .4.6.1 1.2.2 2.3.1h2.2l2.3-.1 1-.2.6-.1 1.2-.4 1-.4 1-.6 1-.7.8-.8.8-.9.7-1 .4-1 .4-1 .3-1.3.1-1zm-6.3 14V58l-.2-.5-.2-.4-.2-.4-.3-.4-.3-.4-.4-.3-.4-.2-.4-.3-.5-.1-.4-.2h-6.6l-.6.2-.4.1-.5.3-.4.3-.3.3-.3.4-.3.4-.2.5-.1.5-.2.5v1l.2.5.1.5.2.4.3.5.3.3.3.4.4.2.5.3.4.2h.6l.5.2zm40.6-14h-6.4v3.6l-.4-.5-.9-.8-1-.8-1-.7-1.2-.5-1.2-.4-1.2-.2H238l-1.2.1-1.2.4-1.2.5-1.2.6-1.9 1.6-.8 1-.7 1-.6 1.2-.4 1.1-.3 1.3-.1 1.2v12.5l.1 1.2.3 1.3.4 1.1.6 1.2.7 1 .8 1 1 .8 1 .8 1 .7 1.3.4 1.2.4 1.2.2h2.5l1.2-.3 1.2-.3 1.2-.6 1-.6 1-.8 1-1 .3-.4v16.4h6.4zm-6.4 12.4V60l-.3-.9-.2-.7-.4-.7-.5-.6-.6-.6-.6-.5-.7-.5-.7-.3-.8-.2-.8-.2h-1.6l-.6.2-.8.2-.7.3-.7.5-.6.5-.6.6-.5.6-.4.7-.2.7-.3.9v9.6l.3.8.2.7.4.7.5.7.6.5.6.5.7.5.7.3.8.2.6.2h1.6l.8-.2.8-.2.7-.3.7-.5.6-.5.6-.5.5-.7.4-.7.2-.7.2-.8.1-.8zM262 54l.8-.8 1.7-1.4 2-1.2 2-1 2.1-.7 2.3-.5 2.2-.1h2.2l2.3.3 2.2.6 1 .3.6.2 1 .5 1 .6.8.8.8.8.6 1 .6 1 .4 1 .3 1.1.1 1.1.1 1.2-.1 1-.3 1.2-.3 1-.5 1-.6 1-.7 1-.8.7-1 .7-.9.6-1 .4-1.2.3-1 .3h-.6l-6.8.5h-.5l-.4.1-.3.2-.4.2-.3.3-.2.2-.3.3-.2.3-.2.4v.3l-.1.4-.1.4v.7l.1.4.2.3.2.4.2.3.3.2.3.3.3.2.3.2.4.1h.2l.7.2 1.5.2h1.5l1.6-.1 1.5-.4 1.4-.4 1.4-.8 1.3-.8.6-.4 4 5-1 .6-1.8 1.2-2 1-2.2.8-2.2.5-2.2.2h-2.3l-2.2-.3-1.1-.2-.6-.2-1-.4-1-.5-1-.6-.9-.7-.8-1-.6-.8-.6-1-.4-1-.3-1.1-.1-1.1v-2.4l.3-1 .3-1.1.5-1 .6-1 .7-1 .8-.7 1-.7.9-.6 1-.4 1.2-.3 1-.3h.6l6.8-.4h.2l.3-.1.4-.1.3-.2.4-.2.3-.2.2-.3.5-.6.2-.3v-.4l.2-.8v-.7l-.2-.3-.1-.4-.2-.3-.2-.4-.3-.2-.3-.2-.3-.3-.3-.1-.2-.1-.7-.3-1.5-.4-1.5-.1-1.6-.1-1.5.2-1.4.3-1.6.5-1.3.7-1.3.8-1.2.9-.6.5zm47-5h-5.3l-.8.2-.8.4-.7.4-.7.4-.7.6-.6.6-.5.8-.4.8-.3.8-.2.8-.1.8v20h-3.2v5.2h3.2v9.6h6.4v-9.6h4.8v-5.1h-4.8V56.5l.1-.5.2-.2v-.2l.2-.1.3-.2.1-.1.3-.1.2-.1h.2l.3-.2h2.9zm8.9 0v31.8h6.3v-3.6l.4.5.9.9 1 .7 1 .6 1 .6 1.2.3 1.2.3 1.2.1h1.3l1.2-.2 1-.2 1.2-.4 1.1-.6 1-.6.5-.4-4.5-5.6-.3.3-.7.4-.6.4-.7.3-.8.1h-2.3l-.8-.1-.7-.3-.7-.4-.6-.4-.6-.6-.5-.5-.4-.7-.4-.6-.3-.7-.1-.8-.2-.7v-20zm50.3 0h-6.4v3.2l-.2-.3-.4-.7-.5-.5-.7-.5-.5-.4-.7-.4-.8-.2-.7-.2h-6.9l-1.2.3-1.1.5-1 .6-1 .7-.9.8-.8 1-.6 1-.5 1-.4 1.1-.2 1.2v2.5l.2 1.2.4 1 .5 1.2.6 1 .8 1 .9.7 1 .7 1 .7 1.1.4 1.2.3 1.2.2h10.2v3.8l-.2.4-.1.4-.2.3-.2.4-.3.4-.6.4-.4.3-.4.1-.4.1h-.2l-.8.3h-5.2l-.8-.2h-.2l-.4-.2-.4-.1-.3-.3-.4-.2-.3-.3-.3-.3-.2-.4-.1-.1-5 4 .3.4.7.9.9.8 1 .6.9.6 1 .4 1.1.4.6.1 1.1.2 2.3.1h2.2l2.3-.1 1.2-.2.5-.1 1.1-.4 1-.4 1-.6 1-.7.9-.8.7-.9.7-1 .4-1 .4-1 .4-1.3v-1l.1-.6zm-6.4 13.9V58l-.2-.5-.1-.4-.3-.4-.3-.4-.6-.7-.4-.2-.4-.3-1-.3H352l-.5.2-.5.1-.4.3-.5.3-.3.3-.3.4-.3.4-.2.5-.2.5v.5l-.1.4v.5l.1.6.2.5.2.4.3.5.3.3.3.4.5.2.4.3.5.2h.5l.4.2zm16-14v35.7l.1 1.1.3 1 .4 1 .4 1 .6 1 .6.8.8.7 1 .7.8.6 1 .4.5.2 1 .4 2 .4 2.2.2h2.1l2.1-.2 2-.4 1.1-.4.5-.2 1-.4 1-.6.8-.7.7-.7.8-.9.5-.9.5-1 .4-1 .2-1 .1-1.1v-2.9l-.2-.7-.3-.8-.3-.6-.4-.6-.5-.7-.5-.5-.6-.4-.6-.5-.7-.3-.4-.1.4-.2.7-.3.6-.4.6-.5.5-.5.5-.6.4-.6.3-.8.3-.7.1-.7.1-.7V56.2l-.7-2.2-.5-.8-.6-1-.7-.7-.9-.7-.8-.7-1-.5-2-.6h-5.5v5.8h3.3l.4.1.4.1.4.2.3.1.3.3.3.2.3.3.2.3.3.7.2.8v12.3l-.2.8-.3.7-.2.3-.3.3-.3.3-.3.2-.3.1-.4.2-.4.1h-4.5v6h4.5l.4.2.7.3.3.2.3.3.3.3.2.3.2.3.1.3.2.9v2l-.2.6-.1.4-.1.3-.3.3-.2.3-.2.2-.4.3-.2.1-.4.2h-.2l-.6.3-1.4.2-1.4.2h-1.4l-1.5-.2-1.4-.2-.7-.2-.1-.1-.4-.2-.3-.1-.2-.3-.3-.2-.2-.3-.2-.3-.2-.3v-.4l-.2-.3V48.9zm60.7 13.6h-20v-1.2l.1-.8.3-.8.2-.8.4-.7.4-.6.6-.7.5-.5.7-.5.7-.4.4-.2.5-.1 1-.3 1-.1 1-.1h1l1 .3.9.2 1 .4.8.6.8.6 1 1 5-4.2-.7-.6-1.2-1.1-1.4-1-1.5-1-1.6-.6-1.6-.5-1.7-.4h-3.5l-1.7.3-1.6.5-1 .2-.6.3-1.4.8-1.3.9-1.1 1-1 1.2-1 1.3-.6 1.5-.6 1.4-.3 1.5-.3 1.6v8l.3 1.6.4 1.7.6 1.5.8 1.4 1 1.4 1.1 1.2 1.3 1 1.3.9 1.6.7 1.6.5 1.6.3 1.7.1h1.6l1.6-.4 1.6-.5 1.5-.7 1.3-.9 1.3-1 1.1-1.2 1-1.4.8-1.4.7-1.5.4-1.7.2-1.6zm-20 5.6v.4l.1.8.3.8.3.8.4.8.5.7.6.6.6.5.8.5.7.4.8.2.9.2h1.7l.8-.2.8-.2.8-.4.7-.5.7-.5.6-.6.4-.7.4-.8.4-.8.2-.8v-1.2z\" style=\"fill:#000;fill-opacity:1;fill-rule:evenodd;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/><path d=\"M390 277a150 150 0 1 0-300 0 150 150 0 0 0 300 0\" style=\"fill:#154889;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/><path d=\"M221.6 350.6h-16.2l-2.1-.2-2-.5-2-.7-2-1-1.8-1.1-1.7-1.4-1.4-1.6-1.3-1.7-1-1.8-1-2-.2-1-13.5-43.2-2.8.5-5.7.4-5.7-.2-5.6-1-5.5-1.7-5.2-2.4-5-3-4.4-3.5-4-4-3.4-4.5-3-5-2.2-5.2-1.6-5.5-.9-5.6-.2-5.8.6-5.7 1.2-5.5 1.9-5.4 2.5-5.1 3.2-4.8 3.7-4.3 4.3-3.8 4.6-3.3 5-2.7 5.5-2 5.5-1.3 5.7-.7h5.7l5.6.8 5.6 1.5 5.3 2.1 5 2.8 4.7 3.3 4.1 4 3.6 4.4 3 4.8 2.6 5.2 1.7 5.4 1.1 5.6.5 5.6-.3 5.7-1 5.6-1.7 5.5-2.4 5.2-3 4.9-3.5 4.5-4.2 4-4.5 3.4-5 3-2.6 1.1 3.7 11.8 54.4-60.4.3-.3.8-.7.8-.6.8-.5.8-.3 1-.3 1-.3h20.7l.7-2.8 1.8-5.4 2.5-5 3.1-4.9 3.6-4.4 4.2-3.9 4.6-3.3 5-2.7 5.3-2.1 5.5-1.5 5.7-.8h5.7l5.6.7 5.5 1.3 5.4 2 5 2.7 4.7 3.3 4.3 3.8 3.6 4.3 3.3 4.8 2.5 5 2 5.4 1.1 5.5.6 5.6-.2 5.8-.8 5.6-1.6 5.5-2.3 5.2-2.8 5-3.4 4.5-4 4-4.5 3.6-4.8 3-5.2 2.4-5.4 1.7-5.6 1-5.8.3-5.6-.4-5.6-1-2.7-.8L286 323l3.4 9.2H300v9.2H260l-.2-.2-.3-.1-.2-.2-.2-.1-.2-.3-.1-.2-.2-.3v-.2l-.2-.2v-1l.1-.2v-.2l.4-.5.2-.2.2-.2.3-.1.2-.2h.4l19.5-4.8-3.5-9.2H194l3.7 12 .2.5.4 1 .6.8.6.9.8.7.8.7.9.6 1 .5 1 .4 1 .2 1 .1h15.7zM191 313.8l57.6-64 24 64zm-18.4-28.3-2.3.4-4.4.2-4.6-.3-4.4-.9-4.3-1.4-4.1-2-3.9-2.4-3.5-2.8-3.1-3.3-2.8-3.6-2.2-4-1.7-4.2-1.2-4.4-.6-4.5-.2-4.5.5-4.6 1-4.3 1.6-4.2 2-4 2.5-3.8 3-3.5 3.4-3 3.7-2.6 4-2.1 4.3-1.6 4.4-1 4.5-.6h4.5l4.5.6 4.4 1.2 4.3 1.6 4 2.2 3.6 2.7 3.4 3 2.8 3.5 2.5 3.8 2 4 1.6 4.3.8 4.4.4 4.6-.1 4.5-.7 4.4-1.3 4.4-1.8 4.2-2.3 3.9-2.7 3.6-3.2 3.3-3.6 2.8-3.8 2.4-2.1 1-10.8-35-.1-.3-.2-.5-.4-.5-.3-.5-.5-.4-.4-.3-.5-.3-.5-.2-.6-.1-.5-.1h-1.2l-.6.1-.5.3-.5.2-.5.3-.4.4-.4.5-.3.5-.3.5-.3 1.1v1.8l.2.2zm85.7-36.2h9.2l.1 2.7.6 5.3 1.3 5.2 1.8 5.1 2.5 4.9 3 4.5 3.5 4 4 3.7 4.2 3.2 2.4 1.4-9.6 21.4zm18.5 0h32l-14.2 31.6-1.7-1.1-3.4-2.6-3-3-2.7-3.2-2.3-3.6-1.9-3.7-1.4-4-1-4.1-.4-4.3zm1-9.3.7-2 1.7-4.2 2-4 2.7-3.6 3-3.3 3.4-3 3.7-2.5 4.1-2 4.2-1.5 4.4-1 4.5-.4h4.5l4.4.7 4.3 1.2 4.2 1.7 3.9 2.1 3.6 2.7 3.3 3.1 2.9 3.4 2.4 3.7 2 4.1 1.4 4.2 1 4.3.4 4.5-.2 4.5-.7 4.5-1.2 4.2-1.8 4.2-2.2 4-2.6 3.4-3.2 3.3-3.4 2.8-3.8 2.4-4 2-4.3 1.4-4.4.9-4.5.3-4.5-.2-4.4-.8-2.2-.5 17-38v-.3l.3-.6.1-.5v-1.6l-.2-.5-.3-.5-.2-.5-.3-.4-.8-.8-.5-.2-1-.5h-.5l-.5-.2z\" style=\"fill:#fff;fill-opacity:1;fill-rule:evenodd;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/>" },
+    "274.1-20": { width: 600, height: 600, svg: "<path d=\"M32.4.5a32 32 0 0 0-32 32v415a32 32 0 0 0 32 32h415.2a32 32 0 0 0 32-32v-415a32 32 0 0 0-32-32\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/><path d=\"M32.4 480A32.4 32.4 0 0 1 0 447.6V32.4A32.4 32.4 0 0 1 32.4 0h415.2A32.4 32.4 0 0 1 480 32.4v415.2a32.4 32.4 0 0 1-32.4 32.4zm0-.5h415.2a32 32 0 0 0 32-32v-415a32 32 0 0 0-32-32H32.4a32 32 0 0 0-32 32v415a32 32 0 0 0 32 32\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/><path d=\"M32.4 471.5a24 24 0 0 1-24-24v-415a24 24 0 0 1 24-24h415.2a24 24 0 0 1 24 24v415a24 24 0 0 1-24 24zm0-12h415.2a12 12 0 0 0 12-12v-415a12 12 0 0 0-12-12H32.4a12 12 0 0 0-12 12v415a12 12 0 0 0 12 12\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/><path d=\"M240 437.5a152 152 0 1 1 0-304 152 152 0 0 1 0 304m0-40a112 112 0 1 0 0-224 112 112 0 0 0 0 224\" style=\"fill:#c1121c;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/><path d=\"M308.4 42.5v67.2h43.2v-9.6h-33V81h28.2v-9h-28.2V52.1h33v-9.6zm-66 0v67.2h9.6l30.6-48v48h10.2V42.5h-9.6l-30.6 48v-48zm-51 23.4a13.8 13.8 0 1 1 27.6 0v20.4a13.8 13.8 0 0 1-27.6 0zm-10.2 0v20.4a24 24 0 0 0 48 0V66a24 24 0 0 0-48 0m-52.8-23.4V51l30.6 49.8h-29.4v9h42V102L141 52.1h30.6v-9.6M162 220.1v17.5l52 65.4a18.7 18.7 0 1 1-33.3 11.6H162a37.3 37.3 0 1 0 66.5-23.3l-42-52.5h50.2v-18.7M269.3 256.3a18.7 18.7 0 1 1 37.4 0v58.3a18.7 18.7 0 0 1-37.4 0zm-18.6 0v58.3a37.3 37.3 0 0 0 74.6 0v-58.3a37.3 37.3 0 1 0-74.6 0\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/>" },
+    "274.1": { width: 600, height: 600, svg: "<defs><clipPath id=\"omc-274.1-a\" clipPathUnits=\"userSpaceOnUse\"><path d=\"M0 0h480v480H0z\"/></clipPath></defs><g clip-path=\"url(#omc-274.1-a)\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"><path d=\"M32.4.5a32 32 0 0 0-32 32v415.1a32 32 0 0 0 32 32h415.2a32 32 0 0 0 32-32V32.4a32 32 0 0 0-32-32\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\"/><path d=\"M32.4 480A32.5 32.5 0 0 1 0 447.6V32.4A32.5 32.5 0 0 1 32.4 0h415.2A32.5 32.5 0 0 1 480 32.4v415.2a32.5 32.5 0 0 1-32.4 32.4zm0-.5h415.2a32 32 0 0 0 32-31.9V32.4a32 32 0 0 0-32-32H32.4a32 32 0 0 0-32 32v415.2a32 32 0 0 0 32 32\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\"/></g><path d=\"M32.4 471.5a24 24 0 0 1-24-23.9V32.4a24 24 0 0 1 24-24h415.2a24 24 0 0 1 24 24v415.2a24 24 0 0 1-24 24zm0-12h415.2a12 12 0 0 0 12-11.9V32.4a12 12 0 0 0-12-12H32.4a12 12 0 0 0-12 12v415.2a12 12 0 0 0 12 12\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/><path d=\"M240 437.5a152 152 0 1 1 0-304 152 152 0 0 1 0 304m0-40a112 112 0 1 0 0-224 112 112 0 0 0 0 224\" style=\"fill:#c1121c;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/><path d=\"M154 252.8h18.9a19.8 19.8 0 0 1 39.1 4.7v2.3c0 11-8.9 19.8-19.8 19.8H184V296h8.2a18.7 18.7 0 1 1-18.4 22.1H155a37.3 37.3 0 0 0 74.5-3.5c0-10.6-5.2-20.6-13.9-26.7 9.4-6.3 15-16.8 15-28.1v-2.3a38.5 38.5 0 0 0-76.7-4.7M268 256.3a18.7 18.7 0 1 1 37.3 0v58.3a18.7 18.7 0 0 1-37.3 0zm-18.7 0v58.3a37.3 37.3 0 0 0 74.7 0v-58.3a37.3 37.3 0 1 0-74.7 0M308.4 42.5v67.2h43.2v-9.6h-33V81h28.2v-9h-28.2V52.1h33v-9.6zm-66 0v67.2h9.6l30.6-48v48h10.2V42.5h-9.6l-30.6 48v-48zm-51 23.4a13.8 13.8 0 1 1 27.6 0v20.4a13.8 13.8 0 0 1-27.6 0zm-10.2 0v20.4a24 24 0 0 0 48 0V66a24 24 0 0 0-48 0m-52.8-23.4V51l30.6 49.8h-29.4v9h42V102L141 52.1h30.6v-9.6\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 600)\"/>" },
+    "282": { width: 601, height: 601, svg: "<path d=\"M480.4 240.4a240 240 0 1 0-480 0 240 240 0 0 0 480 0\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 601)\"/><path d=\"M240.4 480.8a240.4 240.4 0 1 1 0-480.8 240.4 240.4 0 0 1 0 480.8m0-.4a240 240 0 1 0 0-480 240 240 0 0 0 0 480\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 601)\"/><path d=\"M240.4 472.3a232 232 0 0 1 0-463.8 232 232 0 0 1 0 463.8m0-12a219 219 0 0 0 124.7-38.7L59 115.7a219.9 219.9 0 0 0 181.2 344.6m132-43.9 7-5.5L70 101.3l-5.5 7.2zm13.8-11.3 6.6-6L81.8 88l-6.1 6.6zm12.8-12.3 6.1-6.6L94.6 75.7l-6.6 6zm11.9-13.3 5.5-7.2-308-308-7 5.6zm10.7-14.4a219.9 219.9 0 0 0-306-306z\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 0 601)\"/>" },
+    "325.1": { width: 732.1, height: 488.9, svg: "<defs><clipPath id=\"omc-325.1-a\" clipPathUnits=\"userSpaceOnUse\"><path d=\"M0 391h586V0H0z\"/></clipPath><clipPath id=\"omc-325.1-b\" clipPathUnits=\"userSpaceOnUse\"><path d=\"M0 1h586v391H0z\"/></clipPath></defs><g clip-path=\"url(#omc-325.1-a)\" transform=\"matrix(1.25 0 0 -1.25 0 488.9)\"><g clip-path=\"url(#omc-325.1-b)\" transform=\"translate(0 -.9)\"><path d=\"M26.4 1.5a26 26 0 0 0-26 26v338a26 26 0 0 0 26 26h532.9a26 26 0 0 0 26-26v-338a26 26 0 0 0-26-26\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\"/><path d=\"M26.4 391.8A26.4 26.4 0 0 1 0 365.4V27.5A26.4 26.4 0 0 1 26.4 1.1h532.9a26.4 26.4 0 0 1 26.4 26.4v338a26.4 26.4 0 0 1-26.4 26.3zm0-.4h532.9a26 26 0 0 0 26-26V27.5a26 26 0 0 0-26-26h-533a26 26 0 0 0-26 26v338a26 26 0 0 0 26 26\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\"/></g><path d=\"M26.4 10.4c-9 0-16.3 7.3-16.3 16.2v338c0 9 7.3 16.2 16.3 16.2h532.9c9 0 16.2-7.3 16.2-16.2v-338c0-9-7.2-16.2-16.2-16.2\" style=\"fill:#154889;fill-opacity:1;fill-rule:nonzero;stroke:none\"/><path d=\"M126.1 155.6V35.7a21 21 0 0 0-20.8 20.9v73L53.2 46.1a21 21 0 0 0-6.7 28.7l38 60.6v20.1M126.1 160.8H84.4v39.3l-27.8-44.5a18 18 0 0 0-5.8 25.1l36.8 59a20.8 20.8 0 0 0 38.5-11.1V205l39.1-23.4a18 18 0 0 0-25-6.3l-14 8.5M139.2 278a20.8 20.8 0 1 0-41.7 0 20.8 20.8 0 0 0 41.7 0M248.5 50.8a15.1 15.1 0 1 0-30.2 0 15.1 15.1 0 0 0 30.2 0M321 114.3l-19-15.7a10.6 10.6 0 0 0-14.2.6l33.6 33.6c7-3 15-2.2 21.3 2l22.3-5a3 3 0 0 0 2-1.6l11.5-23a10.6 10.6 0 0 0-14.2 4.8l-5.4 10.4h-10.6l9-36.3 20.5-1.5c5.6-.4 9.8-5 9.8-10.6H353q-1.6 0-2.5 1.4l-5.1 7.7-10.6-3V46.3c0-5.7-4.5-10.3-10.1-10.6M345.3 153.7a15.1 15.1 0 1 0-30.3 0 15.1 15.1 0 0 0 30.3 0M227 339.9c-2.9 0-5.5-1.7-6.7-4.4l-11.5-26.6q-1.3-2.9-3.1-5.3l-1.8-2.3a9 9 0 0 1-1.7-5.3v-19c0-4 3.2-7.3 7.3-7.3h108.2c4 0 7.3 3.3 7.3 7.3v19q0 3-1.8 5.3l-1.7 2.3a26 26 0 0 0-3 5.3l-11.7 26.6a7 7 0 0 1-6.7 4.4zm1.8-7.3h69.6a3 3 0 0 0 2.7-1.8l10-23h-95l10 23a3 3 0 0 0 2.7 1.8m-10.5-32.2a8.8 8.8 0 1 0 0-17.6 8.8 8.8 0 0 0 0 17.6m90.6 0a8.8 8.8 0 1 0 0-17.6 8.8 8.8 0 0 0 0 17.6M209.5 266.8H227v-16.1c0-2.5-2-4.4-4.4-4.4H214c-2.5 0-4.4 2-4.4 4.4M300.1 266.8h17.6v-16.1c0-2.5-2-4.4-4.4-4.4h-8.8c-2.4 0-4.4 2-4.4 4.4M474.2 352.2 458.4 342v7.2h-15.7v-17.5l-50.4-33h28.3V188.5h107v110.3H556zm0-9.4 44-36.2V197.9h-31.5v47.2h-25.1V198H430v108.7z\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\"/><path d=\"M442.6 298.7H468v-31.5h-25.3zM480.4 298.7h25.2v-31.5h-25.2zM526.8 59.1l-108 78.2a135 135 0 0 0-55.8 109h13.2c0-39 18.7-75.5 50.2-98.4l100.4-73\" style=\"fill:#fff;fill-opacity:1;fill-rule:nonzero;stroke:none\"/></g>" },
+    "snow": { width: 248, height: 287, svg: "<path d=\"M0 0h248v287H0z\" style=\"fill:#fff;stroke:none\"/><path d=\"M338.9 323.5 352 316v-13.4l11.6 6.7 13.2-7.6v-15.3L352 272v-40l34.7 20v28.6l13.2 7.6 13.2-7.6v-13.4l11.6 6.7 13.2-7.6V251l-11.6-6.6 11.6-6.7v-15.3l-13.2-7.6L400 229l-34.7-20L400 189l24.8 14.3 13.2-7.6v-15.3l-11.6-6.7L438 167v-15.2l-13.2-7.6-11.6 6.6v-13.3l-13.2-7.6-13.2 7.6V166l-34.7 20v-40l24.8-14.4v-15.2l-13.2-7.7-11.6 6.7v-13.3l-13.2-7.7-13.3 7.7v13.3l-11.5-6.7-13.2 7.7v15.2l24.7 14.4v40l-34.7-20v-28.6l-13.2-7.6-13.2 7.6v13.3l-11.6-6.6-13.2 7.6V167l11.6 6.7-11.6 6.7v15.3l13.2 7.6 24.8-14.3 34.7 20-34.7 20.1-24.8-14.3-13.2 7.6v15.3l11.6 6.7-11.6 6.6v15.3l13.2 7.6 11.6-6.7v13.4l13.2 7.6 13.2-7.6V252l34.7-20v40L301 286.3v15.3l13.2 7.6 11.5-6.7V316\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 -299.6 404.4)\"/>" },
+  };
+  // END GENERATED SIGN ART
+})();

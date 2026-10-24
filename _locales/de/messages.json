@@ -1,0 +1,14 @@
+{
+  "extName": {
+    "message": "OSM Maxspeed Colors",
+    "description": "Name der Erweiterung."
+  },
+  "extDescription": {
+    "message": "Färbt Straßen im OSM-Editor iD nach maxspeed. Zeigt Schilder, bedingte Limits sowie Werte je Spur und Richtung.",
+    "description": "Beschreibung in chrome://extensions. Chrome erlaubt höchstens 132 Zeichen."
+  },
+  "extActionTitle": {
+    "message": "OSM Maxspeed Colors – Einstellungen",
+    "description": "Tooltip des Symbols in der Symbolleiste."
+  }
+}
