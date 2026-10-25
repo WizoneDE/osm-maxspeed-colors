@@ -91,6 +91,7 @@
       signs: isOn('signs'),
       extras: isOn('extras'),
       legend: isOn('legend'),
+      defaults: isOn('defaults'),
       hiddenExtras: Array.isArray(s.hiddenExtras) ? s.hiddenExtras.filter((k) => typeof k === 'string').slice(0, 50) : [],
       vehicle: typeof s.vehicle === 'string' && VEHICLE_KEY.test(s.vehicle) ? s.vehicle : 'car',
       unit: s.unit === 'mph' ? 'mph' : 'kmh',
@@ -171,11 +172,17 @@
       variableExtraNone: 'Wechselverkehrszeichen, sonst ohne Limit (Zeichen 282)',
       variableExtraLegend: 'Wechselverkehrszeichen',
       missing: 'fehlt (Fahrzeug)',
-      missingRestricted: 'fehlt, Zufahrt beschränkt (access)',
+      missingRestricted: 'fehlt, Zufahrt beschränkt (access) oder highway=service',
       noSpeed: 'Fußweg u. ä. ohne maxspeed',
       advisory: 'Richtgeschwindigkeit',
       implicit: 'implizit',
       walk: 'Schrittgeschwindigkeit',
+      defaultValue: 'Standardwert des Landes – maxspeed ist nicht getaggt',
+      defaultRoad: (/** @type {string} */ country, /** @type {string} */ road) =>
+        `${country}, ${road ? `Straßenart „${road}“` : 'übrige Straßen'}`,
+      defaultSource: 'Quelle: OSM-Wiki „Default speed limits“',
+      defaultsLegend: 'graues Schild: implizit oder Standardwert',
+      bicycleRoadOpen: (/** @type {string} */ tag) => `maxspeed fehlt: Fahrradstraße für Fahrzeuge freigegeben (${tag})`,
       symbols: {
         '325.1': 'Verkehrsberuhigter Bereich (Zeichen 325.1)',
         '242.1': 'Fußgängerzone (Zeichen 242.1)',
@@ -205,11 +212,17 @@
       variableExtraNone: 'Electronic signs, otherwise no limit (German sign 282)',
       variableExtraLegend: 'Electronic signs',
       missing: 'missing (vehicle)',
-      missingRestricted: 'missing, restricted access (access)',
+      missingRestricted: 'missing, restricted access (access) or highway=service',
       noSpeed: 'footway etc. without maxspeed',
       advisory: 'advisory speed',
       implicit: 'implicit',
       walk: 'walking pace',
+      defaultValue: 'Default of the country – maxspeed is not tagged',
+      defaultRoad: (/** @type {string} */ country, /** @type {string} */ road) =>
+        `${country}, ${road ? `road type “${road}”` : 'other roads'}`,
+      defaultSource: 'Source: OSM wiki “Default speed limits”',
+      defaultsLegend: 'grey sign: implicit or default',
+      bicycleRoadOpen: (/** @type {string} */ tag) => `maxspeed missing: bicycle road open to vehicles (${tag})`,
       symbols: {
         '325.1': 'Living street (German sign 325.1)',
         '242.1': 'Pedestrian zone (German sign 242.1)',
@@ -257,16 +270,19 @@
    * @property {string} raw            The original text.
    */
 
+  /** Walking pace in km/h. 5, so that it falls into the colour band "≤ 5" (7 used to land in 6–29). */
+  const WALK_KMH = 5;
+
   /** Implicit limits "CC:type"; DEFAULT unless the country is listed. Values in km/h. */
   const IMPLICIT = {
     urban: { DEFAULT: 50 },
     rural: { DEFAULT: 100, AT: 100, CH: 80, FR: 80, DK: 80, NL: 80, BE: 90, IT: 90, ES: 90, GB: 96.56 },
     motorway: { DEFAULT: 130, DE: Infinity, CH: 120, NL: 100, GB: 112.65 },
     trunk: { DEFAULT: 100, DE: Infinity, CH: 100 },
-    living_street: { DEFAULT: 7 },
-    pedestrian_zone: { DEFAULT: 7 },
+    living_street: { DEFAULT: WALK_KMH },
+    pedestrian_zone: { DEFAULT: WALK_KMH },
     bicycle_road: { DEFAULT: 30 },
-    walk: { DEFAULT: 7 },
+    walk: { DEFAULT: WALK_KMH },
   };
 
   const KMH_PER_KNOT = 1.852;
@@ -281,7 +297,7 @@
     const raw = value.trim().slice(0, 50);
     const lower = raw.toLowerCase();
     if (lower === 'none') return { kind: 'none', kmh: 0, implicit: false, raw };
-    if (lower === 'walk') return { kind: 'walk', kmh: 7, implicit: false, raw };
+    if (lower === 'walk') return { kind: 'walk', kmh: WALK_KMH, implicit: false, raw };
     if (lower === 'signals' || lower === 'variable') return { kind: 'variable', kmh: 0, implicit: false, raw };
 
     let m = lower.match(/^(\d+(?:\.\d+)?)\s*(mph|knots|km\/h|kmh)?$/);
@@ -408,18 +424,34 @@
    * @property {string} sign           Text on the sign ("" = the number).
    * @property {SignSymbol} symbol    Official German sign drawn instead of the speed
    *                                  sign, "" = none (see fixedSign).
+   * @property {string} bicycleRoad    The tag that makes it a bicycle road (bicycle_road=yes,
+   *                                  cyclestreet=yes or source:maxspeed=DE:bicycle_road), "" if
+   *                                  none. At 30 the main sign is 244.1; at another speed
+   *                                  244.1 is drawn next to the speed or zone sign.
    * @property {string} source         The tag value it came from, for the tooltip.
    * @property {Condition | null} condition  Set when the main value itself is conditional
    *                                  (only maxspeed:conditional is tagged).
    * @property {ExtraLimit[]} extras   Conditional limits (maxspeed:…:conditional).
    * @property {LaneSpeed[] | null} lanes  Per-lane values, left to right in driving direction, if they differ.
+   * @property {DefaultSpeed | null} fallback  Only with status "missing": what the law of
+   *                                  the country sets for this kind of road (see defaultRoad).
+   */
+
+  /**
+   * A legal default speed limit, shown in grey instead of a tagged one.
+   * @typedef {object} DefaultSpeed
+   * @property {DirectionSpeed} info  As if the default tags were on the way.
+   * @property {string} country       Code of the table, e.g. "DE" or "GB-SCT".
+   * @property {string} roadType      Road type from the table, "" for other roads.
+   * @property {string} [openTo]      Not from the table but a bicycle road opened to other
+   *                                  vehicles without maxspeed: the access tag, e.g. "vehicle=destination".
    */
 
   /** @typedef {{ kmh: number, advisory: boolean, sign: string }} LaneSpeed */
 
   /**
    * Official German signs drawn instead of a speed sign: 325.1 living street,
-   * 242.1 pedestrian zone, 244.1 bicycle road, 274.1 30 zone, 274.1-20 20 zone.
+   * 242.1 pedestrian zone, 244.1 bicycle road (at 30), 274.1 30 zone, 274.1-20 20 zone.
    * @typedef {'' | '325.1' | '242.1' | '244.1' | '274.1' | '274.1-20'} SignSymbol
    */
 
@@ -438,9 +470,14 @@
   /** Default advisory speed for maxspeed=none (German "Richtgeschwindigkeit"). */
   const DEFAULT_ADVISORY_KMH = 130;
 
-  /** @param {Tags} tags */
-  const isAccessRestricted = (tags) =>
-    ['access', 'vehicle', 'motor_vehicle', 'motorcar'].some((key) => RESTRICTED_ACCESS.has(tags[key]));
+  /**
+   * Whether a missing limit may well be correct, so it is drawn quieter (red dashes on
+   * grey): restricted access, or highway=service, which is not part of the public
+   * road network and rarely has a limit of its own.
+   * @param {Tags} tags
+   */
+  const isAccessRestricted = (tags) => tags.highway === 'service'
+    || ['access', 'vehicle', 'motor_vehicle', 'motorcar'].some((key) => RESTRICTED_ACCESS.has(tags[key]));
 
   /** 1 = one-way in drawing direction, -1 = against it, 0 = both ways. @param {Tags} tags */
   function onewayOf(tags) {
@@ -503,7 +540,7 @@
    */
   function directionSpeed(tags, vehicleSuffixes, direction, oneway) {
     /** @type {DirectionSpeed} */
-    const base = { status: 'missing', kmh: 0, advisory: false, implicit: false, unlimited: false, variable: false, variableReasons: [], sign: '', symbol: '', source: '', condition: null, extras: [], lanes: null };
+    const base = { status: 'missing', kmh: 0, advisory: false, implicit: false, unlimited: false, variable: false, variableReasons: [], sign: '', symbol: '', source: '', condition: null, extras: [], lanes: null, fallback: null, bicycleRoad: '' };
     const hasAnySpeedTag = Object.keys(tags).some((k) => k === 'maxspeed' || k.startsWith('maxspeed:') || k === 'zone:maxspeed');
 
     const advisoryTag = firstTag(tags, [`maxspeed:advisory:${direction}`, 'maxspeed:advisory']);
@@ -536,10 +573,14 @@
       const implicit = typeTag ? parseSpeed(typeTag.value) : null;
       if (implicit) { value = { ...implicit, implicit: true }; source = `${typeTag?.key}=${typeTag?.value}`; }
     }
-    if (!value && tags.highway === 'living_street') { value = { kind: 'walk', kmh: 7, implicit: true, raw: 'walk' }; source = 'highway=living_street'; }
-    // A bicycle road (German "Fahrradstraße") has 30 km/h unless signed otherwise.
-    const bicycleRoad = tags.bicycle_road === 'yes' || tags.cyclestreet === 'yes';
-    if (!value && bicycleRoad) { value = { kind: 'limit', kmh: 30, implicit: true, raw: '30' }; source = tags.bicycle_road === 'yes' ? 'bicycle_road=yes' : 'cyclestreet=yes'; }
+    // A living street means walking pace by itself (German sign 325.1): no number
+    // exists to tag, so this counts as explicit, not implicit (in colour, not grey).
+    if (!value && tags.highway === 'living_street') { value = { kind: 'walk', kmh: WALK_KMH, implicit: false, raw: 'walk' }; source = 'highway=living_street'; }
+    // A bicycle road (German "Fahrradstraße", sign 244.1) has 30 km/h unless signed
+    // otherwise; source:maxspeed=DE:bicycle_road says the same.
+    const bicycleRoad = tags.bicycle_road === 'yes' ? 'bicycle_road=yes' : tags.cyclestreet === 'yes' ? 'cyclestreet=yes'
+      : ['source:maxspeed', 'maxspeed:type'].filter((k) => /^[A-Z]{2}:bicycle_road$/i.test(tags[k] || '')).map((k) => `${k}=${tags[k]}`)[0] || '';
+    if (!value && bicycleRoad) { value = { kind: 'limit', kmh: 30, implicit: true, raw: '30' }; source = bicycleRoad; }
 
     // Electronic signs: maxspeed:variable=yes (or a reason such as "weather"), with
     // maxspeed holding the usual maximum. maxspeed=signals is the outdated form.
@@ -550,7 +591,7 @@
     const variableReasons = variable
       ? (variableTag?.value || '').split(';').map((v) => v.trim()).filter((v) => v && v !== 'yes').slice(0, 4)
       : [];
-    Object.assign(base, { variableReasons });
+    Object.assign(base, { variableReasons, bicycleRoad });
 
     if (value && value.kind === 'variable') return { ...base, status: 'variable', variable: true, source, extras };
     if (value) {
@@ -558,10 +599,25 @@
       if (lanes) source += `\n${lanesTag?.key}=${lanesTag?.value}`;
       if (variable) source += `\n${variableSource}`;
       const symbol = lanes || variable ? '' : fixedSign(tags, value, bicycleRoad);
-      return {
-        ...base, status: 'limit', ...shownSpeed(value, advisoryKmh), implicit: value.implicit,
+      /** @type {DirectionSpeed} */
+      const result = {
+        // maxspeed=none without maxspeed:advisory: on motorways the advisory 130 is the
+        // rule itself (in Germany signed at the border, not tagged per road), so it is
+        // explicit. On other roads (e.g. a motorway-like Kraftfahrstraße) the advisory
+        // speed is tagged when it applies, so an untagged 130 there is only assumed.
+        ...base, status: 'limit', ...shownSpeed(value, advisoryKmh),
+        implicit: value.implicit || (value.kind === 'none' && !advisoryKmh && !/^motorway(_link)?$/.test(tags.highway || '')),
         unlimited: value.kind === 'none', source, extras, lanes, symbol, variable,
       };
+      // A bicycle road is closed to other vehicles by default (vehicle=no). Once they
+      // are let in (vehicle, motor_vehicle or motorcar other than "no"), maxspeed
+      // should be tagged: without it the value counts as missing, with the implicit
+      // 30 as a grey sign.
+      const openTag = !!bicycleRoad && result.implicit
+        ? ['vehicle', 'motor_vehicle', 'motorcar'].find((key) => tags[key] && tags[key] !== 'no')
+        : undefined;
+      if (openTag) return { ...base, extras, fallback: { info: result, country: '', roadType: '', openTo: `${openTag}=${tags[openTag]}` } };
+      return result;
     }
     if (variable && !lanes) return { ...base, status: 'variable', variable: true, source: variableSource, extras };
     if (lanes) {
@@ -591,9 +647,11 @@
    * German sign that stands for this value on its own, or "": 325.1 for walking
    * pace on a living street, 244.1 for 30 on a bicycle road, 274.1 (and 274.1-20)
    * for a 30 (20) zone, tagged as zone:maxspeed=DE:30 or maxspeed=DE:zone30 ….
+   * A bicycle road with another speed keeps its speed or zone sign; 244.1 is then
+   * drawn next to it (DirectionSpeed.bicycleRoad).
    * @param {Tags} tags
    * @param {SpeedValue} value
-   * @param {boolean} bicycleRoad
+   * @param {string} bicycleRoad
    * @returns {SignSymbol}
    */
   function fixedSign(tags, value, bicycleRoad) {
@@ -610,15 +668,344 @@
 
   /**
    * What applies to one way and vehicle type, per direction.
-   * On one-way roads only the driving direction counts.
+   * On one-way roads only the driving direction counts. Unless `country` is null,
+   * a missing value gets the legal default of the country as `fallback`.
    * @param {Tags} tags
    * @param {string[]} vehicleSuffixes
+   * @param {string | null} [country]  e.g. "DE"; "" = not known (zone:traffic may
+   *                                   still name it); null = no defaults.
    */
-  function waySpeed(tags, vehicleSuffixes) {
+  function waySpeed(tags, vehicleSuffixes, country = null) {
     const oneway = onewayOf(tags);
     const forward = oneway === -1 ? null : directionSpeed(tags, vehicleSuffixes, 'forward', oneway);
     const backward = oneway === 1 ? null : directionSpeed(tags, vehicleSuffixes, 'backward', oneway);
+    if (country !== null && (forward?.status === 'missing' || backward?.status === 'missing')) {
+      const road = defaultRoad(country, tags);
+      if (road) {
+        const merged = { ...tags, ...defaultTagsFor(road.tags, tags) };
+        // The table gives truck limits also for all goods vehicles (maxspeed:goods).
+        const suffixes = vehicleSuffixes.includes('hgv') ? [...vehicleSuffixes, 'goods'] : vehicleSuffixes;
+        for (const [info, direction] of /** @type {const} */ ([[forward, 'forward'], [backward, 'backward']])) {
+          if (info?.status !== 'missing' || info.fallback) continue;
+          const def = directionSpeed(merged, suffixes, direction, oneway);
+          if (def?.status === 'limit') info.fallback = { info: def, country: road.country, roadType: road.roadType };
+        }
+      }
+    }
     return { oneway, forward, backward, restricted: isAccessRestricted(tags) };
+  }
+
+  // ===========================================================================
+  // Legal default speed limits (defaultSpeedTable, at the end of this file)
+  // ===========================================================================
+  // Where a road has no maxspeed, the law of the country still sets a limit by the
+  // kind of road. The OSM wiki page "Default speed limits" lists these per country
+  // and road type; a road type is recognised by tag filters such as
+  // "{rural} and highway~trunk|primary", where {rural} refers to another road type.
+  // Filter syntax and the order in which road types are tried follow
+  // osm-legal-default-speeds (github.com/westnordost), the reference implementation
+  // for that page.
+
+  /** @typedef {{ revision: number, date: string, roadTypes: Record<string, string>, countries: Record<string, Array<[string, Tags]>> }} DefaultSpeedTable */
+  /** @typedef {(tags: Tags, placeholder: (name: string) => boolean) => boolean} TagFilter */
+
+  /** @type {DefaultSpeedTable | null} */
+  let defaultTable = null;
+  const defaultSpeeds = () => (defaultTable ??= defaultSpeedTable());
+
+  /** Lengths in metres for comparisons such as width<=7.6 (also "7.6 m", "25 ft", 25'). */
+  const LENGTH_UNITS = /** @type {Record<string, number>} */ ({ '': 1, m: 1, km: 1000, ft: 0.3048, "'": 0.3048, mi: 1609.344 });
+
+  /** A number with an optional unit, or null. @param {string | undefined} value */
+  function numberWithUnit(value) {
+    const m = /^\s*(-?\d+(?:\.\d+)?)\s*(m|km|ft|'|mi)?\s*$/.exec(value || '');
+    return m ? Number(m[1]) * LENGTH_UNITS[m[2] || ''] : null;
+  }
+
+  /** A regex that has to match the whole text, as in the reference implementation. @param {string} source */
+  const wholeMatch = (source) => new RegExp(`^(?:${source})$`);
+
+  /**
+   * Compiles a tag filter, e.g. `highway~primary|secondary and !{urban} and lanes>=2`.
+   * Supported: key, !key, key=v, key!=v, key~regex, key!~regex, ~keyregex,
+   * ~keyregex~regex, key<n (<=, >, >=), {road type}, !{road type}, and, or, !( ),
+   * brackets, "quoted" values. Throws on a syntax error.
+   * @param {string} text
+   * @returns {TagFilter}
+   */
+  function compileTagFilter(text) {
+    let pos = 0;
+    const OPERATORS = ['>=', '<=', '!=', '!~', '>', '<', '=', '~'];
+    /** @param {string} message @returns {never} */
+    const fail = (message) => { throw new Error(`${message} at ${pos} in: ${text}`); };
+    const spaces = () => { while (pos < text.length && /\s/.test(text[pos])) pos++; };
+    /** @param {string} s */
+    const isNext = (s) => text.startsWith(s, pos);
+    /** A word, ending at a space or ")" – a key also at an operator. @param {boolean} isKey */
+    const word = (isKey) => {
+      const quote = text[pos];
+      if (quote === '"' || quote === "'") {
+        let end = pos + 1;
+        while (end < text.length && (text[end] !== quote || text[end - 1] === '\\')) end++;
+        if (end >= text.length) fail('open quotation mark');
+        const s = text.slice(pos + 1, end).replace(/\\(['"])/g, '$1');
+        pos = end + 1;
+        return s;
+      }
+      let end = pos;
+      while (end < text.length && !/[\s)]/.test(text[end]) && !(isKey && /[=~<>!]/.test(text[end]))) end++;
+      if (end === pos) fail('missing key or value');
+      const s = text.slice(pos, end);
+      pos = end;
+      return s;
+    };
+    const operator = () => {
+      const before = pos;
+      spaces();
+      const op = OPERATORS.find(isNext);
+      if (!op) { pos = before; return ''; }
+      pos += op.length;
+      spaces();
+      return op;
+    };
+    /** @param {Tags} t @param {string} key */
+    const has = (t, key) => Object.prototype.hasOwnProperty.call(t, key);
+
+    /** @returns {TagFilter} */
+    const tag = () => {
+      if (isNext('!~')) { pos += 2; spaces(); const re = wholeMatch(word(true)); return (t) => !Object.keys(t).some((k) => re.test(k)); }
+      if (isNext('!')) { pos += 1; spaces(); const key = word(true); return (t) => !has(t, key); }
+      if (isNext('~')) {
+        pos += 1;
+        spaces();
+        const keyRe = wholeMatch(word(true));
+        const op = operator();
+        if (!op) return (t) => Object.keys(t).some((k) => keyRe.test(k));
+        if (op !== '~') fail(`unexpected ${op}`);
+        const valueRe = wholeMatch(word(false));
+        return (t) => Object.entries(t).some(([k, v]) => keyRe.test(k) && valueRe.test(v));
+      }
+      const key = word(true);
+      const op = operator();
+      if (!op) return (t) => has(t, key);
+      if (op === '=' || op === '!=') {
+        const value = word(false);
+        return op === '=' ? (t) => has(t, key) && t[key] === value : (t) => !has(t, key) || t[key] !== value;
+      }
+      if (op === '~' || op === '!~') {
+        const re = wholeMatch(word(false));
+        return op === '~' ? (t) => has(t, key) && re.test(t[key]) : (t) => !has(t, key) || !re.test(t[key]);
+      }
+      const limit = numberWithUnit(word(false));
+      if (limit === null) fail('expected a number');
+      /** @type {(n: number) => boolean} */
+      const compare = op === '<' ? (n) => n < limit : op === '<=' ? (n) => n <= limit : op === '>' ? (n) => n > limit : (n) => n >= limit;
+      return (t) => { const n = has(t, key) ? numberWithUnit(t[key]) : null; return n !== null && compare(n); };
+    };
+    /** "and" / "or" followed by a space or bracket. @param {string} keyword */
+    const isKeyword = (keyword) => {
+      spaces();
+      if (!isNext(keyword) || !/[\s(]/.test(text[pos + keyword.length] || '')) return false;
+      pos += keyword.length;
+      return true;
+    };
+    const closing = () => { spaces(); if (text[pos] !== ')') fail('missing )'); pos++; };
+    /** @returns {TagFilter} */
+    const unary = () => {
+      spaces();
+      if (/^!\s*\(/.test(text.slice(pos, pos + 20))) {
+        pos = text.indexOf('(', pos) + 1;
+        const inner = or();
+        closing();
+        return (t, p) => !inner(t, p);
+      }
+      if (isNext('(')) { pos++; const inner = or(); closing(); return inner; }
+      const negated = isNext('!{');
+      if (negated || isNext('{')) {
+        pos += negated ? 2 : 1;
+        const end = text.indexOf('}', pos);
+        if (end < 0) fail('missing }');
+        const name = text.slice(pos, end);
+        pos = end + 1;
+        return negated ? (t, p) => !p(name) : (t, p) => p(name);
+      }
+      return tag();
+    };
+    /** @returns {TagFilter} */
+    const and = () => {
+      const parts = [unary()];
+      while (isKeyword('and')) parts.push(unary());
+      return parts.length === 1 ? parts[0] : (t, p) => parts.every((f) => f(t, p));
+    };
+    /** @returns {TagFilter} */
+    function or() {
+      const parts = [and()];
+      while (isKeyword('or')) parts.push(and());
+      return parts.length === 1 ? parts[0] : (t, p) => parts.some((f) => f(t, p));
+    }
+    const filter = or();
+    spaces();
+    if (pos < text.length) fail('unexpected text');
+    return filter;
+  }
+
+  // Only the exact tag filters are used. The table's fuzzy filters guess "urban"
+  // from lit=yes, a sidewalk or highway=residential, but those are found outside
+  // built-up areas too. Inside or outside comes from tags that say so:
+  // zone:traffic=DE:urban (or :rural), rural=yes/no, or a maxspeed code such as
+  // source:maxspeed=DE:rural.
+
+  /** Compiled filter per road type; null = none or unreadable. @type {Map<string, TagFilter | null>} */
+  const roadTypeFilters = new Map();
+
+  /** @param {string} name */
+  function filterOf(name) {
+    let filter = roadTypeFilters.get(name);
+    if (filter === undefined) {
+      const types = defaultSpeeds().roadTypes;
+      const source = Object.prototype.hasOwnProperty.call(types, name) ? types[name] : '';
+      try { filter = source ? compileTagFilter(source) : null; } catch { filter = null; }
+      roadTypeFilters.set(name, filter);
+    }
+    return filter;
+  }
+
+  /**
+   * Whether the way is of this road type.
+   * @param {string} name
+   * @param {Tags} tags
+   * @param {number} [depth]  Guards against road types that refer to each other.
+   * @returns {boolean}
+   */
+  function isRoadType(name, tags, depth = 0) {
+    if (depth > 20) return false;
+    const filter = filterOf(name);
+    return !!filter && filter(tags, (other) => isRoadType(other, tags, depth + 1));
+  }
+
+  /**
+   * Whether it stays open if a road is of this type although it does not match:
+   * the type depends on being inside or outside built-up areas ({urban}, {rural},
+   * directly or through other types), or it has no exact filter at all.
+   * @param {string} name
+   * @param {number} [depth]
+   * @returns {boolean}
+   */
+  function isUndecidable(name, depth = 0) {
+    if (name === 'urban' || name === 'rural') return true;
+    if (depth > 20) return false;
+    const types = defaultSpeeds().roadTypes;
+    const source = Object.prototype.hasOwnProperty.call(types, name) ? types[name] : '';
+    return !source || [...source.matchAll(/\{([^}]+)\}/g)].some((m) => isUndecidable(m[1], depth + 1));
+  }
+
+  /**
+   * zone:traffic of the whole way. On a road along a border, :left and :right may
+   * differ; then it is left out, as neither side applies to the whole road.
+   * @param {Tags} tags
+   * @returns {Tags}
+   */
+  function withZoneTraffic(tags) {
+    const left = tags['zone:traffic:left'];
+    if (tags['zone:traffic'] || !left || left !== tags['zone:traffic:right']) return tags;
+    return { ...tags, 'zone:traffic': left };
+  }
+
+  /**
+   * Road type of a way in a country, with the tags that apply there by law.
+   * Rows below the fallback row ("" = other roads, usually rural) win from the
+   * bottom up, then rows above it from the top down. The fallback row itself only
+   * counts where no other row could still apply (see isUndecidable): in Germany,
+   * for instance, an untagged road could be inside or outside a built-up area.
+   * @param {string} country  e.g. "DE", "GB-SCT"; a subdivision without own rows
+   *                          uses its country. "" = not known.
+   * @param {Tags} tags
+   * @returns {{ country: string, roadType: string, tags: Tags } | null}
+   */
+  function defaultRoad(country, tags) {
+    const { countries } = defaultSpeeds();
+    const has = (/** @type {string} */ code) => Object.prototype.hasOwnProperty.call(countries, code);
+    const zoned = withZoneTraffic(tags);
+    // The country code in zone:traffic (e.g. BE-VLG:urban) names the table, also
+    // where the borders in iD do not know the region (Belgium, US states …).
+    const zoneCode = (/^([A-Z]{2}(?:-[A-Z0-9]{1,3})?):/i.exec(zoned['zone:traffic'] || '') || [])[1]?.toUpperCase() || '';
+    const sameCountry = !country || zoneCode.split('-')[0] === country.split('-')[0];
+    const code = zoneCode && has(zoneCode) && sameCountry ? zoneCode : country;
+    const own = has(code) ? code : code.split('-')[0];
+    if (!own || !has(own)) return null;
+    const rows = countries[own];
+    const split = rows.findIndex(([name]) => !name);
+    const below = split < 0 ? [] : rows.slice(split + 1).reverse();
+    const above = split < 0 ? rows : rows.slice(0, split);
+    const row = [...below, ...above].find(([name]) => isRoadType(name, zoned));
+    if (row) return { country: own, roadType: row[0], tags: row[1] };
+    if (split < 0 || rows.some(([name]) => name && isUndecidable(name))) return null;
+    return { country: own, roadType: '', tags: rows[split][1] };
+  }
+
+  /** km/h of a plain number value, null for anything else (walk, none …). @param {string | undefined} value */
+  function plainKmh(value) {
+    const parsed = parseSpeed(value);
+    return parsed && parsed.kind === 'limit' && !parsed.implicit ? parsed.kmh : null;
+  }
+
+  /**
+   * Removes limits under `key` that are not below `max`: in the table every limit is
+   * an additional restriction, so a truck limit of 80 means nothing where all
+   * vehicles have 50. Conditional lists keep only their lower entries.
+   * @param {Tags} result
+   * @param {string} key
+   * @param {number | null} max
+   */
+  function limitSpeedsTo(result, key, max) {
+    if (max !== null) {
+      for (const sub of Object.keys(result)) {
+        if (!sub.startsWith(`${key}:`)) continue;
+        if (sub.endsWith(':conditional')) {
+          const lower = splitConditional(result[sub]).filter((part) => {
+            const kmh = plainKmh(part.split('@')[0]);
+            return kmh === null || kmh < max;
+          });
+          if (lower.length) result[sub] = lower.join('; ');
+          else delete result[sub];
+          continue;
+        }
+        const kmh = plainKmh(result[sub]);
+        if (kmh !== null && kmh >= max) delete result[sub];
+      }
+    }
+    for (const sub of Object.keys(result).filter((k) => k.startsWith(`${key}:`))) {
+      const own = plainKmh(result[sub]);
+      limitSpeedsTo(result, sub, max === null ? own : own === null ? max : Math.min(max, own));
+    }
+  }
+
+  /**
+   * Default tags of a road type that the way does not set itself, ready to be
+   * merged into its tags.
+   * @param {Tags} roadTags  From defaultRoad.
+   * @param {Tags} tags      Of the way.
+   * @returns {Tags}
+   */
+  function defaultTagsFor(roadTags, tags) {
+    /** @type {Tags} */
+    const result = { ...roadTags };
+    limitSpeedsTo(result, 'maxspeed', plainKmh(result.maxspeed));
+    // The table gives limits for trailers as a condition ("80 @ (trailer)"); this
+    // extension has its own vehicle type for them (maxspeed:trailer).
+    const conditional = result['maxspeed:conditional'];
+    if (conditional) {
+      const rest = [];
+      for (const part of splitConditional(conditional)) {
+        const m = /^(.+?)\s*@\s*\((?:trailer|caravan)\)$/.exec(part);
+        if (m && !result['maxspeed:trailer']) result['maxspeed:trailer'] = m[1].trim();
+        else if (!m) rest.push(part);
+      }
+      if (rest.length) result['maxspeed:conditional'] = rest.join('; ');
+      else delete result['maxspeed:conditional'];
+    }
+    for (const key of Object.keys(tags)) delete result[key];
+    return result;
   }
 
   // ===========================================================================
@@ -818,10 +1205,11 @@
    * right-hand traffic.
    * @param {Tags} tags
    * @param {string[]} vehicleSuffixes  See OMC_VEHICLES, e.g. ["hgv"]; [] for cars.
+   * @param {string | null} [country]  For the legal defaults, see waySpeed.
    * @returns {LineStyle | null}
    */
-  function lineStyleFor(tags, vehicleSuffixes) {
-    const { forward, backward, restricted } = waySpeed(tags, vehicleSuffixes);
+  function lineStyleFor(tags, vehicleSuffixes, country = null) {
+    const { forward, backward, restricted } = waySpeed(tags, vehicleSuffixes, country);
     /** @type {Stripe[]} */
     let stripes;
     /** @type {SignSpot[]} */
@@ -873,6 +1261,34 @@
       info.condition && info.condition.raw !== info.condition.label ? info.condition.raw : '',
       info.source,
     ].filter(Boolean).join('\n');
+  }
+
+  /**
+   * Whether a sign is drawn in grey. Only a speed tagged explicitly (a number, none,
+   * walk) is in colour. Grey: implicit values (maxspeed=DE:urban, source:maxspeed or
+   * maxspeed:type without maxspeed, an untagged bicycle road …) and the country's
+   * legal default where nothing is tagged.
+   * @param {DirectionSpeed} info
+   */
+  const isGreySign = (info) => (info.status === 'missing' ? !!info.fallback : info.implicit);
+
+  /**
+   * Tooltip of a grey sign: the default value, that it is not tagged, and where it
+   * comes from (country, road type) – or, for a bicycle road opened to other
+   * vehicles, that maxspeed is missing there.
+   * @param {DefaultSpeed} fallback
+   */
+  function defaultTooltip(fallback) {
+    const t = text();
+    if (fallback.openTo) return [signTooltip(fallback.info), t.bicycleRoadOpen(fallback.openTo)].join('\n');
+    let country = fallback.country;
+    try { country = new Intl.DisplayNames([LANG], { type: 'region' }).of(fallback.country) || country; } catch { /* e.g. GB-SCT */ }
+    return [
+      signTooltip(fallback.info).split('\n')[0],
+      t.defaultValue,
+      t.defaultRoad(country, fallback.roadType),
+      t.defaultSource,
+    ].join('\n');
   }
 
   // ===========================================================================
@@ -1014,6 +1430,7 @@
   if (typeof module !== 'undefined') {
     module.exports = {
       parseSpeed, parseConditional, directionSpeed, waySpeed, onewayOf, lineStyleFor, signLabel, signTooltip,
+      compileTagFilter, defaultRoad, defaultTagsFor, defaultTooltip, defaultSpeeds, isGreySign,
       conditionPanels, mainPanels, variablePanels,
       setDisplay, setNoSpeedRules, setExtraTypes, setVehicles, suffixesFor, checkSettings, bandFor, bandLabel, colorBands, shown,
     };
@@ -1083,7 +1500,8 @@
     const lineStyle = new WeakMap();
     // iD replaces a way's tags object whenever the way is edited, so the style can
     // be kept per tags object until the settings change.
-    /** @type {WeakMap<object, LineStyle | null>} */
+    // The legal defaults also depend on the country, so it is stored with the style.
+    /** @type {WeakMap<object, { country: string | null, style: LineStyle | null }>} */
     let styleByTags = new WeakMap();
     let redrawPending = false;
     /** @type {HTMLDivElement | null} */
@@ -1110,20 +1528,139 @@
       return tags && typeof tags === 'object' ? { id: data.id, tags } : null;
     }
 
-    /** @param {Tags} tags */
-    function styleOf(tags) {
-      let style = styleByTags.get(tags);
-      if (style === undefined) {
-        style = lineStyleFor(tags, suffixesFor(settings.vehicle));
-        styleByTags.set(tags, style);
+    /** @param {Tags} tags @param {string | null} country  null = no defaults. */
+    function styleOf(tags, country) {
+      let cached = styleByTags.get(tags);
+      if (!cached || cached.country !== country) {
+        cached = { country, style: lineStyleFor(tags, suffixesFor(settings.vehicle), country) };
+        styleByTags.set(tags, cached);
       }
-      return style;
+      return cached.style;
+    }
+
+    // -------------------------------------------------------------------------
+    // Country of a way, for the legal default speed limits
+    // -------------------------------------------------------------------------
+    // iD bundles the country borders it needs for its presets (country-coder). Its
+    // location manager tells which registered areas contain a point, so the
+    // countries of the default table are registered there once. Codes iD does not
+    // know (most states and provinces) are left out; there the country's own rows
+    // apply, if the table has any.
+    // Where on earth a point of the map is, follows from iD's URL (#map=zoom/lat/lon
+    // is the centre of the map) and Web Mercator with 256 px tiles, like iD itself.
+
+    /** Location set id → table code; null until registered, empty if iD has no location manager. @type {Map<string, string> | null} */
+    let countryIds = null;
+
+    /** @returns {any} */
+    const locationManager = () => /** @type {any} */ (window).iD?.locationManager;
+
+    /** Table code at a point, "" if none. @param {number} lon @param {number} lat */
+    function countryAt(lon, lat) {
+      const manager = locationManager();
+      if (!countryIds) {
+        countryIds = new Map();
+        if (!manager) return '';
+        /** @type {Array<{ code: string, locationSet: { include: string[] }, locationSetID?: string }>} */
+        const sets = [];
+        for (const code of Object.keys(defaultSpeeds().countries)) {
+          // An unknown code would be registered as the whole world, so it is checked first.
+          try { manager.validateLocation(code.toLowerCase()); } catch { continue; }
+          sets.push({ code, locationSet: { include: [code.toLowerCase()] } });
+        }
+        try { manager.registerLocationSets(sets); } catch { return ''; }
+        for (const set of sets) if (set.locationSetID) countryIds.set(set.locationSetID, set.code);
+      }
+      if (!manager || !countryIds.size) return '';
+      // Several areas contain the point (GB and GB-SCT): the smallest one wins.
+      let best = '';
+      let bestArea = Infinity;
+      try {
+        for (const [id, area] of manager.locationSetsAt([lon, lat])) {
+          const code = countryIds.get(id);
+          if (code && area < bestArea) { best = code; bestArea = area; }
+        }
+      } catch { return ''; }
+      return best;
+    }
+
+    /** Map view from the URL and the map's screen box, or null. */
+    function mapView() {
+      const m = /[#&]map=([\d.]+)\/(-?[\d.]+)\/(-?[\d.]+)/.exec(location.hash);
+      const map = document.querySelector('.main-map');
+      if (!m || !map) return null;
+      const box = map.getBoundingClientRect();
+      const k = (256 * 2 ** Number(m[1])) / (2 * Math.PI);
+      const y0 = Math.log(Math.tan(Math.PI / 4 + (Number(m[2]) * Math.PI) / 360));
+      /** Longitude and latitude at a point on screen. @param {number} x @param {number} y */
+      const lonLat = (x, y) => [
+        Number(m[3]) + ((x - (box.left + box.width / 2)) / k) * (180 / Math.PI),
+        (2 * Math.atan(Math.exp(y0 - (y - (box.top + box.height / 2)) / k)) - Math.PI / 2) * (180 / Math.PI),
+      ];
+      return { key: `${m[0]} ${box.left} ${box.top} ${box.width} ${box.height}`, box, lonLat };
+    }
+
+    /** View the countries below were found for. */
+    let countryViewKey = '';
+    /** Country of the whole view if it shows only one, else null. @type {string | null} */
+    let viewCountry = null;
+    /** Country per way id, for views with more than one country. @type {Map<string, string>} */
+    const countryByWay = new Map();
+
+    /** Called once per redraw: did the view move to other countries? */
+    function updateViewCountry() {
+      const view = mapView();
+      const key = view ? view.key : '';
+      if (key === countryViewKey) return;
+      countryViewKey = key;
+      countryByWay.clear();
+      if (!view) { viewCountry = ''; return; }
+      // Corners, edge centres and centre: if all lie in one country, so does every way.
+      const { box } = view;
+      const found = new Set();
+      for (const fx of [0, 0.5, 1]) {
+        for (const fy of [0, 0.5, 1]) {
+          const [lon, lat] = view.lonLat(box.left + fx * box.width, box.top + fy * box.height);
+          found.add(countryAt(lon, lat));
+        }
+      }
+      viewCountry = found.size === 1 ? [...found][0] : null;
+    }
+
+    // iD writes the map position into the URL only after the map has stopped
+    // moving, and without a hashchange event. The countries found during the move
+    // may then be off, so a changed URL triggers another redraw.
+    let lastHash = location.hash;
+    setInterval(() => {
+      if (location.hash === lastHash) return;
+      lastHash = location.hash;
+      if (settings.enabled && settings.defaults) scheduleRedraw();
+    }, 1000);
+
+    /** Country of one way line ("" = none known). @param {SVGPathElement} path @param {string} id */
+    function countryOf(path, id) {
+      if (viewCountry !== null) return viewCountry;
+      let country = countryByWay.get(id);
+      if (country === undefined) {
+        country = '';
+        const view = mapView();
+        const matrix = path.getScreenCTM();
+        if (view && matrix) {
+          const b = path.getBBox();
+          const p = new DOMPoint(b.x + b.width / 2, b.y + b.height / 2).matrixTransform(matrix);
+          const [lon, lat] = view.lonLat(p.x, p.y);
+          country = countryAt(lon, lat);
+        }
+        countryByWay.set(id, country);
+      }
+      return country;
     }
 
     /** Colours one way line. @param {SVGPathElement} path */
     function paintLine(path) {
       const entity = settings.enabled ? entityOf(path) : null;
-      const style = entity ? styleOf(entity.tags) : null;
+      const country = entity && settings.defaults && ROADS.has(entity.tags.highway) ? countryOf(path, entity.id) : null;
+      const style = entity ? styleOf(entity.tags, country) : null;
       lineStyle.set(path, style);
 
       const key = style ? style.key : '';
@@ -1161,6 +1698,7 @@
       redrawPending = false;
       if (!document.querySelector('.layer-osm')) return;
       updateLegend();
+      if (settings.defaults) updateViewCountry();
       // One <path class="way line stroke"> per way. ".casing" is the outline below,
       // ".shadow" the selection halo and ".target" iD's invisible click area; those
       // stay untouched here.
@@ -1271,14 +1809,16 @@
 
     // Official sign artwork (SIGN_ART, at the end of this file) is put into the map
     // once as <symbol> elements and drawn with <use>, so each sign on the map is a
-    // single small element.
-    /** @type {SVGDefsElement | null} */
+    // single small element. The symbols sit in a plain <g>, not in <defs>: iD looks
+    // up its clip paths with selectAll("defs") and fails on a <defs> of ours
+    // ("insertBefore … not a child", 2026-10-25); symbols are not drawn either way.
+    /** @type {SVGGElement | null} */
     let artDefs = null;
 
     /** Makes sure the <symbol> elements exist in the map's SVG. @param {SVGSVGElement} svg */
     function ensureArt(svg) {
       if (artDefs && artDefs.ownerSVGElement === svg && artDefs.isConnected) return;
-      artDefs = /** @type {SVGDefsElement} */ (svgElement('defs', { class: 'osm-maxspeed-art' }));
+      artDefs = /** @type {SVGGElement} */ (svgElement('g', { class: 'osm-maxspeed-art' }));
       for (const [key, art] of Object.entries(SIGN_ART)) {
         const symbol = svgElement('symbol', { id: `omc-sign-${key}`, viewBox: `0 0 ${art.width} ${art.height}` });
         // The artwork is a constant in this file, never data from the page.
@@ -1369,14 +1909,23 @@
      * blue square for an advisory speed (like the German sign 380), dark square for
      * variable signs, or an official sign (symbol). `inner` puts an official sign on
      * the dark face of an electronic sign (282 where there is no limit otherwise).
+     * `muted` draws it in grey: a legal default, not a tagged value.
      * Returns the group, not yet placed, and its extent.
-     * @param {{ label: string, kind: 'limit'|'advisory'|'variable', symbol?: SignSymbol, inner?: string, panels: Panel[], radius?: number, tooltip?: string }} spec
+     * @param {{ label: string, kind: 'limit'|'advisory'|'variable', symbol?: SignSymbol, inner?: string, panels: Panel[], radius?: number, tooltip?: string, muted?: boolean }} spec
      * @returns {{ group: SVGGElement, box: Box }}
      */
     function signUnit(spec) {
       const { label, kind } = spec;
       const r = spec.radius || SIGN_RADIUS;
       const group = /** @type {SVGGElement} */ (svgElement('g', {}));
+      // Grey faces (drawSignFace); the filter also turns panels and artwork grey.
+      // Set through element.style, not a style attribute: openstreetmap.org's
+      // Content-Security-Policy (style-src without 'unsafe-inline') drops style
+      // attributes, but allows the CSSOM (2026-10-25).
+      if (spec.muted) {
+        group.style.filter = 'grayscale(1)';
+        group.style.opacity = '0.85';
+      }
       // Shown by our own tooltip (see showSignTooltip); the sign itself never takes
       // mouse events, so clicks reach the map underneath.
       if (spec.tooltip) group.setAttribute('data-tooltip', spec.tooltip);
@@ -1384,7 +1933,7 @@
       let box;
       if (spec.inner && SIGN_ART[spec.inner]) {
         box = { l: -r, t: -r, r, b: r };
-        drawSignFace(group, '', kind, r, r);
+        drawSignFace(group, '', kind, r, r, !!spec.muted);
         group.append(artUse(spec.inner, 0, 0, 2 * r * 0.84));
       } else if (spec.symbol && SIGN_ART[spec.symbol]) {
         const height = 2 * r * SYMBOL_SCALE;
@@ -1395,7 +1944,7 @@
       } else {
         const w = signHalfWidth(label, r);
         box = { l: -w, t: -r, r: w, b: r };
-        drawSignFace(group, label, kind, r, w);
+        drawSignFace(group, label, kind, r, w, !!spec.muted);
       }
       const { bottom, halfWidth } = addPanels(group, spec.panels, r, box.b);
       return { group, box: { l: Math.min(box.l, -halfWidth), t: box.t, r: Math.max(box.r, halfWidth), b: bottom } };
@@ -1408,25 +1957,28 @@
      * @param {'limit'|'advisory'|'variable'} kind
      * @param {number} r
      * @param {number} w  Half width.
+     * @param {boolean} muted  Grey: a legal default, not a tagged value.
      */
-    function drawSignFace(sign, label, kind, r, w) {
+    function drawSignFace(sign, label, kind, r, w, muted) {
+      const ring = muted ? '#9e9e9e' : '#d00';
+      const face = muted ? '#eeeeee' : '#fff';
       if (kind === 'advisory') {
-        sign.append(svgElement('rect', { x: -w, y: -r, width: 2 * w, height: 2 * r, rx: 2, fill: '#1d4ed8', stroke: '#fff', 'stroke-width': 1.5 }));
+        sign.append(svgElement('rect', { x: -w, y: -r, width: 2 * w, height: 2 * r, rx: 2, fill: muted ? '#8a8a8a' : '#1d4ed8', stroke: '#fff', 'stroke-width': 1.5 }));
       } else if (kind === 'variable') {
         // Dark face of an electronic sign.
         sign.append(svgElement('rect', { x: -w, y: -r, width: 2 * w, height: 2 * r, rx: 3, fill: '#212121', stroke: '#fff', 'stroke-width': 1.5 }));
       } else if (w > r) {
         // Ring stretched to a rounded bar for one value per lane.
         const sw = r * 0.27;
-        sign.append(svgElement('rect', { x: -w + sw / 2, y: -r + sw / 2, width: 2 * w - sw, height: 2 * r - sw, rx: r - sw / 2, fill: '#fff', stroke: '#d00', 'stroke-width': sw }));
+        sign.append(svgElement('rect', { x: -w + sw / 2, y: -r + sw / 2, width: 2 * w - sw, height: 2 * r - sw, rx: r - sw / 2, fill: face, stroke: ring, 'stroke-width': sw }));
       } else {
-        sign.append(svgElement('circle', { r, fill: '#fff', stroke: '#d00', 'stroke-width': r * 0.27 }));
+        sign.append(svgElement('circle', { r, fill: face, stroke: ring, 'stroke-width': r * 0.27 }));
       }
       const value = svgElement('text', {
         'text-anchor': 'middle', 'dominant-baseline': 'central',
         'font-family': 'system-ui,sans-serif', 'font-weight': 700,
         'font-size': signFontSize(label, r),
-        fill: kind === 'advisory' ? '#fff' : kind === 'variable' ? '#ffca28' : '#111',
+        fill: kind === 'advisory' ? '#fff' : kind === 'variable' ? '#ffca28' : muted ? '#616161' : '#111',
       });
       value.textContent = label;
       sign.append(value);
@@ -1581,7 +2133,8 @@
         /** How far a box reaches from its centre in direction u (a unit vector). @param {Box} box @param {{ x: number, y: number }} u */
         const reach = (box, u) => Math.max(box.l * u.x, box.r * u.x) + Math.max(box.t * u.y, box.b * u.y);
         /** @param {DirectionSpeed} info */
-        const hasSign = (info) => info.status === 'limit' || info.status === 'variable' || (info.status === 'noSpeed' && !!info.symbol);
+        const hasSign = (info) => info.status === 'limit' || info.status === 'variable' || (info.status === 'noSpeed' && !!info.symbol)
+          || (info.status === 'missing' && !!info.fallback);
 
         /** Lines that get signs, with what both passes below need. */
         const signLines = [];
@@ -1671,8 +2224,12 @@
             // A sign on the line itself moves aside if another line runs alongside.
             const away = style.signs.length === 1 && style.signs[0].side === 0 ? awayFromNeighbour(at, right, index) : 0;
 
-            for (const { info, side: ownSide } of style.signs) {
-              if (!hasSign(info)) continue;
+            for (const { info: tagged, side: ownSide } of style.signs) {
+              if (!hasSign(tagged)) continue;
+              // No value tagged, but a legal default: its sign, in grey.
+              const fallback = tagged.status === 'missing' ? tagged.fallback : null;
+              const info = fallback ? fallback.info : tagged;
+              const muted = isGreySign(tagged);
               const side = ownSide || away;
               const main = signUnit({
                 label: signLabel(info),
@@ -1680,7 +2237,8 @@
                   : (info.lanes ? info.lanes.every((l) => l.advisory) : info.advisory) ? 'advisory' : 'limit',
                 symbol: info.symbol,
                 panels: mainPanels(info),
-                tooltip: signTooltip(info),
+                tooltip: fallback ? defaultTooltip(fallback) : signTooltip(info),
+                muted,
               });
               // Beside the line (split way or neighbouring line), the sign moves just
               // far enough along the normal that no part of it reaches the line.
@@ -1701,6 +2259,18 @@
               let distance = reach(main.box, outward);
               /** @type {Array<Parameters<typeof signUnit>[0]>} */
               const extraSpecs = [];
+              // A bicycle road with a speed other than its 30: sign 244.1 next to the
+              // speed or zone sign (with 30, 244.1 is the main sign itself). Shown also
+              // with extra signs switched off.
+              if (info.bicycleRoad && info.symbol !== '244.1') {
+                extraSpecs.push({
+                  label: '',
+                  kind: 'limit',
+                  symbol: '244.1',
+                  panels: [],
+                  tooltip: `${text().symbols['244.1']}\n${info.bicycleRoad}`,
+                });
+              }
               if (settings.extras && info.status === 'limit' && info.variable) {
                 const reasons = info.variableReasons.map((r) => PANEL_TEXT[LANG].reasons[/** @type {'weather'} */ (r)] || r);
                 extraSpecs.push({
@@ -1724,7 +2294,9 @@
                   kind: 'limit',
                   panels: conditionPanels(extra),
                   radius: EXTRA_SIGN_RADIUS,
-                  tooltip: `${shown(extra.kmh)} ${unitLabel()} ${extra.label}${extra.raw !== extra.label ? `\n${extra.raw}` : ''}`,
+                  tooltip: `${shown(extra.kmh)} ${unitLabel()} ${extra.label}${extra.raw !== extra.label ? `\n${extra.raw}` : ''}${fallback ? `\n${text().defaultValue}` : ''}`,
+                  // Conditional limits are tagged as numbers; grey only if they come from the table.
+                  muted: !!fallback,
                 });
               }
               for (const spec of extraSpecs) {
@@ -1901,6 +2473,17 @@
       addRow(body, COLOR_VARIABLE, text().variable, 'dashed', UNDER_VARIABLE);
       addRow(body, COLOR_MISSING, text().missing, 'dashed', UNDER_MISSING);
       addRow(body, COLOR_MISSING, text().missingRestricted, 'dashed', UNDER_MISSING_RESTRICTED);
+      if (settings.signs) {
+        // Grey sign: no number tagged, the value is implicit (DE:urban, living street …)
+        // or the country's legal default.
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:6px;align-items:center';
+        const face = svgElement('svg', { width: 22, height: 16, viewBox: '-11 -8 22 16' });
+        face.style.flex = 'none';
+        drawSignFace(face, String(shown(50)), 'limit', 7.5, 7.5, true);
+        row.append(face, text().defaultsLegend);
+        body.append(row);
+      }
       addRow(body, '#ffffff', text().noSpeed, 'dashed');
 
       // Kinds of extra signs, only while they are shown on the map, each with a
@@ -1938,7 +2521,7 @@
         item.style.cssText = 'display:flex;gap:6px;align-items:center';
         const face = svgElement('svg', { width: 16, height: 16, viewBox: '-8 -8 16 16' });
         face.style.flex = 'none';
-        drawSignFace(face, '≈', 'variable', 7, 7);
+        drawSignFace(face, '≈', 'variable', 7, 7, false);
         item.append(face, text().variableExtraLegend);
         kinds.append(item);
       }
@@ -2032,4 +2615,463 @@
     "snow": { width: 248, height: 287, svg: "<path d=\"M0 0h248v287H0z\" style=\"fill:#fff;stroke:none\"/><path d=\"M338.9 323.5 352 316v-13.4l11.6 6.7 13.2-7.6v-15.3L352 272v-40l34.7 20v28.6l13.2 7.6 13.2-7.6v-13.4l11.6 6.7 13.2-7.6V251l-11.6-6.6 11.6-6.7v-15.3l-13.2-7.6L400 229l-34.7-20L400 189l24.8 14.3 13.2-7.6v-15.3l-11.6-6.7L438 167v-15.2l-13.2-7.6-11.6 6.6v-13.3l-13.2-7.6-13.2 7.6V166l-34.7 20v-40l24.8-14.4v-15.2l-13.2-7.7-11.6 6.7v-13.3l-13.2-7.7-13.3 7.7v13.3l-11.5-6.7-13.2 7.7v15.2l24.7 14.4v40l-34.7-20v-28.6l-13.2-7.6-13.2 7.6v13.3l-11.6-6.6-13.2 7.6V167l11.6 6.7-11.6 6.7v15.3l13.2 7.6 24.8-14.3 34.7 20-34.7 20.1-24.8-14.3-13.2 7.6v15.3l11.6 6.7-11.6 6.6v15.3l13.2 7.6 11.6-6.7v13.4l13.2 7.6 13.2-7.6V252l34.7-20v40L301 286.3v15.3l13.2 7.6 11.5-6.7V316\" style=\"fill:#000;fill-opacity:1;fill-rule:nonzero;stroke:none\" transform=\"matrix(1.25 0 0 -1.25 -299.6 404.4)\"/>" },
   };
   // END GENERATED SIGN ART
+
+  // BEGIN GENERATED DEFAULT SPEEDS
+  /**
+   * Legal default speed limits per country, from the OSM wiki page "Default speed
+   * limits" (https://wiki.openstreetmap.org/wiki/Default_speed_limits), licensed
+   * CC BY-SA 2.0. Written by dev/build-defaults.js; check monthly for updates with
+   * `node dev/build-defaults.js --check`.
+   * A function, not a constant: declarations are hoisted, so the code above can
+   * use it although this block comes last (the Node tests return before it).
+   * @returns {DefaultSpeedTable}
+   */
+  function defaultSpeedTable() {
+    return {
+      revision: 3108406, date: '2026-10-25',
+      roadTypes: {
+        "Alabama: rural highway": "{rural} and ref~\"(US|AL|I).*\"",
+        "Alabama: rural highway with 2 or more lanes in each direction": "{Alabama: rural highway} and {road with 2 or more lanes in each direction}",
+        "Albania: Rrugë interurbane kryesore": "{rural} and {dual carriageway} and lanes>=2",
+        "Alberta: Provincial highway": "ref",
+        "Alberta: Urban provincial highway": "{urban} and ref",
+        "Alberta: Urban road": "{urban} and !ref",
+        "alley": "highway=service and service=alley",
+        "Andorra: Carretera general": "ref~CG.*",
+        "Andorra: Carretera secundària": "ref~CS.*",
+        "Argentina: Avenida": "{urban} and highway~trunk|trunk_link|primary|primary_link|secondary|secondary_link",
+        "Argentina: Calle": "{urban} and highway~tertiary|tertiary_link|unclassified|residential|living_street|pedestrian|service|track",
+        "Argentina: Semiautopista": "highway~trunk|trunk_link and {motorroad}",
+        "Benin: Route nationale": "ref~\"RN(IE)?.*\"",
+        "Brasil: Estrada rural": "",
+        "Brasil: Rodovia rural de pista dupla": "",
+        "Brasil: Rodovia rural de pista simples": "",
+        "Brasil: Via urbana arterial": "",
+        "Brasil: Via urbana coletora": "",
+        "Brasil: Via urbana de trânsito rápido": "",
+        "Brasil: Via urbana local": "",
+        "business district": "abutters~retail|commercial",
+        "California: alley": "highway=service and (!width or width<=7.6)",
+        "county road": "",
+        "Croatia:brza cesta": "highway~trunk|trunk_link and ref~B.*",
+        "cycle street": "bicycle_road=yes or cyclestreet=yes",
+        "District of Columbia: alley": "highway=service and (!width or width<9.144)",
+        "dual carriageway": "dual_carriageway=yes or maxspeed:type~\".*nsl_dual\"",
+        "dual carriageway in residential district": "{dual carriageway} and {residential district}",
+        "dual carriageway with 2 or more lanes in each direction": "{dual carriageway} and lanes>=2",
+        "Ecuador: Via perimetral": "",
+        "Egypt: \"الطرق السريعة أو الرئيسية التى تربط المحافظات ، والتى تتبع المحليات أو الهيئة العامة للطرق والكبارى\"": "",
+        "Egypt: \"الطرق الصحراوية\"": "",
+        "expressway": "expressway=yes",
+        "Flanders:Jaagpad": "designation=towpath",
+        "footway": "highway=footway",
+        "frontage road": "frontage_road=yes or side_road=yes",
+        "Guatemala: Arteria principal": "{urban} and ((!{oneway} and lanes>=3 and width>=10.5) or ({oneway} and lanes>=2 and width>=7))",
+        "Guatemala: Arteria secundaria": "{urban} and ((!{oneway} and lanes>=3 and width>=9) or ({oneway} and lanes>=2 and width>=6))",
+        "Guatemala: Camino": "{unpaved road}",
+        "Guatemala: Carretera principal": "{rural} and lanes>=2 and width>=7 and {has shoulder}",
+        "Guatemala: Carretera secundaria": "{rural} and lanes>=2 and width>=5.5",
+        "Guatemala: Vía local": "{urban} and width>=5",
+        "Guatemala: Vía rápida": "{rural} and {has shoulder} and (({oneway} and lanes>=2 and width>=7) or (!{oneway} and lanes>=4 and width>=14))",
+        "Guatemala: Vía rápida urbana": "{urban} and {has shoulder} and (({oneway} and lanes>=2 and width>=7) or (!{oneway} and lanes>=4 and width>=14))",
+        "Guatemala: Vía residencial": "{urban} and width>=3 and width<5.5",
+        "Guyana: Timehri Field / Linden Highway": "",
+        "has no sidewalk": "sidewalk~no|none or sidewalk:both~no|none or (sidewalk:left~no|none and sidewalk:right~no|none)",
+        "has shoulder": "shoulder~yes|both|left|right or shoulder:left=yes or shoulder:right=yes or shoulder:both=yes",
+        "hilly road": "",
+        "Idaho: State highway": "ref~\"(ID|SH|US).*\"",
+        "Iowa: Institutional road": "",
+        "Iowa: suburban district": "{urban} and !{school zone} and !{residential district} and !{business district}",
+        "Ireland: National road": "ref~N.* or (highway~trunk|trunk_link|primary|primary_link and (!ref or ref~N.*))",
+        "Italy: Autostrada": "{motorway}",
+        "Italy: Strada extraurbana local": "{rural}",
+        "Italy: Strada extraurbana principale": "{rural} and highway~trunk|trunk_link and {dual carriageway} and lanes>=2 and {has shoulder}",
+        "Italy: Strada extraurbana secondaria": "{rural} and {single carriageway} and lanes>=2",
+        "Kansas: state highway": "ref~\"(KS|US).*\"",
+        "lettered road with 2 lanes": "ref~[A-Z] and lanes=2",
+        "living street": "highway=living_street or living_street=yes",
+        "Malawi: rural highway": "{rural} and surface~asphalt|concrete and width>5.5",
+        "Mauritius: A road": "ref~A.*",
+        "Mauritius: B road": "ref~B.*",
+        "Mauritius: C road": "ref~C.*",
+        "Mauritius: M road": "ref~M.*",
+        "Mexico: avenida primaria sin acceso controlado": "highway~primary|primary_link and expressway!=yes",
+        "Mexico: calle secundaria o calle terciaria": "highway~secondary|secondary_link|tertiary|tertiary_link|unclassified",
+        "Mexico: carretera o autopista de jurisdicción federal": "ref~MEX.*",
+        "Mexico: carril central de una avenida de acceso controlado": "highway~primary|primary_link and expressway=yes",
+        "Mexico: zona de hospital, asilo, albergue o casa hogar": "highway~living_street|service|pedestrian|residential",
+        "Mexico: zona o entorno escolar": "{school zone}",
+        "Mexico: zona o entorno escolar en una vía secundaria o calle terciaria": "{Mexico: calle secundaria o calle terciaria} and {school zone}",
+        "Mongolia: тууш замд": "",
+        "motorroad": "motorroad=yes",
+        "motorroad with 2 lanes in each direction": "{motorroad} and {road with 2 or more lanes in each direction}",
+        "motorroad with dual carriageway": "{motorroad} and {dual carriageway}",
+        "motorroad with single carriageway": "{motorroad} and {single carriageway}",
+        "motorway": "highway~motorway|motorway_link",
+        "motorway with 2 lanes in each direction": "{motorway} and {road with 2 or more lanes in each direction}",
+        "Nebraska: State expressway or super-two highway": "{expressway} and {Nebraska: State highway}",
+        "Nebraska: State highway": "ref~\"(NE|US).*\"",
+        "Newfoundland and Labrador: Trans-Canada highway": "ref=1",
+        "Nicaragua: Carretera": "",
+        "Niger: autoroute": "highway~motorway|motorway_link",
+        "Niger: national road": "ref~N.*",
+        "numbered road": "ref",
+        "Ohio: Urban state route": "ref~SR.* and {urban}",
+        "oneway": "oneway~yes|-1 or junction~roundabout|circular",
+        "Palestine: شارعمختل": "",
+        "Panama: Avenida": "",
+        "Panama: Avenida de dos carriles": "",
+        "Panama: Carretera multicarril en zona urbana": "",
+        "parking lot": "highway=service and service=parking_aisle",
+        "pedestrian zone": "highway=pedestrian",
+        "Perú: Avenida": "name~Avenida.*",
+        "Perú: Carretera": "ref~PE.*",
+        "Perú: Vía Expresa": "name~\"Vía Expresa.*\"",
+        "Philippines: Barangay road": "designation=barangay_road or designation=barangay",
+        "Philippines: National road": "ref~[1-9][0-9]? or ref~[1-9][0-9][0-9] or  designation~national_tertiary_road|national_secondary_road|national_primary_road",
+        "Philippines: Provincial road": "designation=provincial_road",
+        "Philippines: Through street": "{urban} and (ref or designation~provincial_road|national_tertiary_road|national_secondary_road|national_primary_road)",
+        "playground zone": "hazard=children or playground_zone=yes or hazard=playground_zone or restriction=playground_zone or maxspeed:variable=playground_zone",
+        "public park": "abutters=park",
+        "Quebec: Autoroute": "(ref >= 1 and ref <= 99) or (ref >= 400 and ref <= 999)",
+        "residential district": "abutters=residential",
+        "road with 1 lane in each direction": "!lanes or ((!{oneway} and lanes=2) or ({oneway} and lanes=1))",
+        "road with 2 lanes in each direction": "((!{oneway} and lanes=4) or ({oneway} and lanes=2))",
+        "road with 2 or more lanes in each direction": "((!{oneway} and lanes>=4) or ({oneway} and lanes>=2))",
+        "road with 3 lanes in each direction": "((!{oneway} and lanes=6) or ({oneway} and lanes=3))",
+        "road with 4 or more lanes in each direction": "((!{oneway} and lanes>=8) or ({oneway} and lanes>=4))",
+        "road with asphalt or concrete surface": "surface~asphalt|concrete or (!surface and tracktype=grade1)",
+        "road without asphalt or concrete surface": "(surface and surface!~asphalt|concrete) or (!surface and tracktype and tracktype!=grade1)",
+        "Romania: drum expres": "{rural} and {expressway}",
+        "Romania: drum național european (E)": "{rural} and int_ref~E.*",
+        "roundabout": "junction=roundabout",
+        "rural": "source:maxspeed~\".*(rural|motorway|motorroad)\" or maxspeed:type~\".*(rural|motorway|motorroad|nsl_single|nsl_dual)\" or zone:maxspeed~\".*(rural|motorway|motorroad)\" or zone:traffic~\".*(rural|motorway|motorroad)\" or maxspeed~\".*(rural|motorway|motorroad)\" or HFCS~.*Rural.* or rural=yes",
+        "rural dual carriageway": "{rural} and {dual carriageway}",
+        "rural dual carriageway with 2 or more lanes in each direction": "{rural} and {dual carriageway with 2 or more lanes in each direction}",
+        "rural expressway": "{rural} and {expressway}",
+        "rural expressway without traffic lights": "",
+        "rural motorroad": "{rural} and {motorroad}",
+        "rural motorroad with single carriageway": "{rural} and {motorroad} and {single carriageway}",
+        "rural motorway": "{rural} and {motorway}",
+        "rural numbered road": "{rural} and {numbered road}",
+        "rural one-way road with 1 lane": "{rural} and {oneway} and lanes=1",
+        "rural open mountain road": "",
+        "rural playground zone": "{rural} and {playground zone}",
+        "rural residential district": "{rural} and {residential district}",
+        "rural road with 1 lane in each direction": "{rural} and {road with 1 lane in each direction}",
+        "rural road with 2 lanes in each direction": "{rural} and {road with 2 lanes in each direction}",
+        "rural road with 2 or more lanes in each direction": "{rural} and {road with 2 or more lanes in each direction}",
+        "rural road with 3 lanes in each direction": "{rural} and {road with 3 lanes in each direction}",
+        "rural road with 4 or more lanes in each direction": "{rural} and {road with 4 or more lanes in each direction}",
+        "rural road with asphalt or concrete surface": "{rural} and {road with asphalt or concrete surface}",
+        "rural road without asphalt or concrete surface": "{rural} and {road without asphalt or concrete surface}",
+        "rural school zone": "{rural} and {school zone}",
+        "rural single carriageway": "{rural} and {single carriageway}",
+        "rural single carriageway with 2 or more lanes in each direction": "{rural} and {single carriageway} and lanes>=4",
+        "rural unpaved road": "{rural} and {unpaved road}",
+        "rural US interstate highway": "{rural} and {US interstate highway}",
+        "rural winding mountain road": "",
+        "school zone": "school_zone=yes or hazard=school_zone or restriction=school_zone or maxspeed:variable=school_zone",
+        "Senegal: National road": "",
+        "service road": "highway=service",
+        "Singapore: silver zone": "hazard=elderly or silver_zone=yes or hazard=silver_zone",
+        "single carriageway": "dual_carriageway=no or maxspeed:type~\".*nsl_single\"",
+        "single carriageway in residential district": "{single carriageway} and {residential district}",
+        "Spain: Travesía": "",
+        "state park": "",
+        "suburban business district": "",
+        "suburban residential district": "",
+        "Tennessee: Rural state road with 2 or more lanes in each direction": "{Tennessee: State route} and {rural} and {road with 2 or more lanes in each direction}",
+        "Tennessee: State route": "ref~\"(TN|SR|US).*\"",
+        "Thailand: motorway that is not a ทํางพิเศษ": "{motorway} and ref",
+        "Thailand: ทํางขนําน": "{frontage road}",
+        "Thailand: ทํางพิเศษ not on bridge or in tunnel": "{motorway} and !ref and (!bridge or bridge=no) and (!tunnel or tunnel=no)",
+        "Thailand: ทํางพิเศษ on bridge or in tunnel": "{motorway} and !ref and ((bridge and bridge!=no) or (tunnel and tunnel!=no))",
+        "trailer park": "abutters=trailer_park",
+        "trunk": "highway~trunk|trunk_link",
+        "United Kingdom: restricted road": "lit=yes or maxspeed:type=GB:nsl_restricted",
+        "unpaved road": "surface~unpaved|ground|gravel|dirt|grass|compacted|sand|fine_gravel|earth|pebblestone|mud|clay|soil|rock|laterite or (!surface and tracktype and tracktype!=grade1)",
+        "urban": "source:maxspeed~.*urban or maxspeed:type~.*urban or zone:maxspeed~.*urban or zone:traffic~.*urban or maxspeed~.*urban or HFCS~.*Urban.* or rural=no",
+        "urban and without centerline": "{urban} and {without centerline}",
+        "urban business district": "{urban} and {business district}",
+        "urban dual carriageway": "{urban} and {dual carriageway}",
+        "urban dual carriageway with 2 or more lanes in each direction": "{urban} and {dual carriageway with 2 or more lanes in each direction}",
+        "urban expressway": "{urban} and {expressway}",
+        "urban expressway without traffic lights": "",
+        "urban motorroad": "{urban} and {motorroad}",
+        "urban motorway": "{urban} and {motorway}",
+        "urban one-way road with 1 lane": "{urban} and {oneway} and lanes<2",
+        "urban playground zone": "{urban} and {playground zone}",
+        "urban public park": "{urban} and {public park}",
+        "urban residential district": "{urban} and {residential district}",
+        "urban road which is not numbered": "{urban} and !{numbered road}",
+        "urban road with 2 lanes in each direction": "{urban} and {road with 2 lanes in each direction}",
+        "urban road with 2 or more lanes in each direction": "{urban} and {road with 2 or more lanes in each direction}",
+        "urban road with 3 lanes in each direction": "{urban} and {road with 3 lanes in each direction}",
+        "urban road with 4 or more lanes in each direction": "{urban} and {road with 4 or more lanes in each direction}",
+        "urban road without sidewalk": "{urban} and {has no sidewalk}",
+        "urban school zone": "{urban} and {school zone}",
+        "urban single carriageway": "{urban} and {single carriageway}",
+        "urban unpaved road": "{urban} and {unpaved road}",
+        "urban US interstate highway": "{urban} and {US interstate highway}",
+        "US interstate highway": "ref~I.* and {motorway}",
+        "US interstate highway with 2 or more lanes in each direction": "{US interstate highway} and ((lanes>=2 and {oneway}) or (lanes>=4 and !{oneway}))",
+        "village": "",
+        "Virginia: Rustic road": "ref~R.*",
+        "Virginia: State primary highway": "ref~\"(US|VA).*\"",
+        "Washington: State highway": "ref~\"(US|WA).*\"",
+        "Wisconsin: Rustic road": "ref~R.*",
+        "Wisconsin: semiurban or outlying district": "",
+        "without centerline": "lanes<2 or lane_markings=no",
+        "Wyoming: State highway": "ref~WYO?.*",
+      },
+      countries: {
+        "AD": [["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"60"}],["Andorra: Carretera secundària",{"maxspeed":"60"}],["Andorra: Carretera general",{"maxspeed":"90"}],["motorroad",{"maxspeed":"120"}],["motorway",{"maxspeed":"120"}]],
+        "AE": [["service road",{"maxspeed":"25"}],["urban single carriageway",{"maxspeed":"40"}],["urban dual carriageway",{"maxspeed":"60","maxspeed:bus":"80","maxspeed:hgv":"80"}],["",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:hgv":"80"}],["rural",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:hgv":"80"}],["motorway",{"maxspeed":"120","maxspeed:bus":"80","maxspeed:hgv":"80"}]],
+        "AF": [["",{"maxspeed":"90"}]],
+        "AG": [["urban",{"maxspeed":"20 mph","maxspeed:bus":"15 mph","maxspeed:goods":"15 mph"}],["",{"maxspeed":"40 mph","maxspeed:bus":"25 mph","maxspeed:goods":"25 mph"}],["rural",{"maxspeed":"40 mph","maxspeed:bus":"25 mph","maxspeed:goods":"25 mph"}]],
+        "AL": [["urban",{"maxspeed":"40","maxspeed:bus:conditional":"35 @ (weightrating>8)","maxspeed:hgv:conditional":"35 @ (trailer); 35 @ (articulated)"}],["",{"maxspeed":"80","maxspeed:bus:conditional":"70 @ (weightrating>8)","maxspeed:hgv":"70","maxspeed:hgv:conditional":"70 @ (trailer); 70 @ (articulated); 60 @ (weightrating>12)"}],["rural",{"maxspeed":"80","maxspeed:bus:conditional":"70 @ (weightrating>8)","maxspeed:hgv":"70","maxspeed:hgv:conditional":"70 @ (trailer); 70 @ (articulated); 60 @ (weightrating>12)"}],["Albania: Rrugë interurbane kryesore",{"maxspeed":"90","maxspeed:bus:conditional":"70 @ (weightrating>8)","maxspeed:hgv":"70","maxspeed:hgv:conditional":"70 @ (trailer); 70 @ (articulated); 60 @ (weightrating>12)"}],["motorway",{"maxspeed":"110","maxspeed:bus:conditional":"90 @ (weightrating>8)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (trailer); 80 @ (articulated); 80 @ (weightrating>12)"}]],
+        "AM": [["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"60","maxspeed:bus":"70","maxspeed:coach":"90","maxspeed:conditional":"70 @ (trailer)","maxspeed:hgv":"70"}],["",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:coach":"90","maxspeed:conditional":"70 @ (trailer)","maxspeed:hgv":"70"}],["rural",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:coach":"90","maxspeed:conditional":"70 @ (trailer)","maxspeed:hgv":"70"}],["motorway",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:coach":"90","maxspeed:conditional":"90 @ (trailer)","maxspeed:hgv":"90"}]],
+        "AO": [["urban",{"maxspeed":"60","maxspeed:bus":"50","maxspeed:bus:conditional":"40 @ (trailer)","maxspeed:conditional":"50 @ (trailer)","maxspeed:goods":"60","maxspeed:goods:conditional":"50 @ (trailer)","maxspeed:hgv":"50","maxspeed:hgv:conditional":"50 @ (articulated); 40 @ (trailer)"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"70 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"80 @ (articulated); 70 @ (trailer)"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"70 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"80 @ (articulated); 70 @ (trailer)"}],["motorroad",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:bus:conditional":"80 @ (trailer)","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods":"90","maxspeed:goods:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (articulated); 70 @ (trailer)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:bus:conditional":"90 @ (trailer)","maxspeed:conditional":"100 @ (trailer)","maxspeed:goods":"110","maxspeed:goods:conditional":"90 @ (trailer)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"90 @ (articulated); 80 @ (trailer)"}]],
+        "AR": [["school zone",{"maxspeed":"20"}],["Argentina: Calle",{"maxspeed":"40"}],["Argentina: Avenida",{"maxspeed":"60"}],["",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:conditional":"80 @ (caravan)","maxspeed:goods":"110","maxspeed:hgv":"80"}],["rural",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:conditional":"80 @ (caravan)","maxspeed:goods":"110","maxspeed:hgv":"80"}],["Argentina: Semiautopista",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:conditional":"80 @ (caravan)","maxspeed:goods":"110","maxspeed:hgv":"80"}],["motorway",{"maxspeed":"130","maxspeed:bus":"100","maxspeed:conditional":"80 @ (caravan)","maxspeed:goods":"110","maxspeed:hgv":"80"}]],
+        "AS": [["urban",{"maxspeed":"15 mph"}],["",{"maxspeed":"25 mph"}],["rural",{"maxspeed":"25 mph"}]],
+        "AT": [["pedestrian zone",{"maxspeed":"walk"}],["living street",{"maxspeed":"walk"}],["cycle street",{"maxspeed":"30"}],["urban",{"maxspeed":"50","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer); 70 @ (weightrating>3.5)","maxspeed:hgv":"70"}],["",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer); 70 @ (weightrating>3.5)","maxspeed:hgv":"70"}],["rural",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer); 70 @ (weightrating>3.5)","maxspeed:hgv":"70"}],["motorroad",{"maxspeed":"100","maxspeed:bus":"100","maxspeed:bus:conditional":"80 @ (articulated)","maxspeed:conditional":"100 @ (trailer); 80 @ (weightrating>3.5)","maxspeed:hgv":"80"}],["motorway",{"maxspeed":"130","maxspeed:bus":"100","maxspeed:bus:conditional":"80 @ (articulated)","maxspeed:conditional":"100 @ (trailer); 80 @ (weightrating>3.5)","maxspeed:hgv":"80"}]],
+        "AU": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"100"}],["rural",{"maxspeed":"100"}]],
+        "AU-ACT": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"100","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12)"}],["rural",{"maxspeed":"100","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12)"}]],
+        "AU-NSW": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"100","maxspeed:conditional":"100 @ (weightrating>4.5)"}],["rural",{"maxspeed":"100","maxspeed:conditional":"100 @ (weightrating>4.5)"}]],
+        "AU-NT": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"110","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12)"}],["rural",{"maxspeed":"110","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12)"}]],
+        "AU-QLD": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"100","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12)","maxspeed:hgv:conditional":"90 @ (trailer); 90 @ (articulated)"}],["rural",{"maxspeed":"100","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12)","maxspeed:hgv:conditional":"90 @ (trailer); 90 @ (articulated)"}]],
+        "AU-SA": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"100","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12)"}],["rural",{"maxspeed":"100","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12)"}]],
+        "AU-TAS": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"100","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12)"}],["rural road with asphalt or concrete surface",{"maxspeed":"100","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12)"}],["rural road without asphalt or concrete surface",{"maxspeed":"80"}]],
+        "AU-VIC": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"100","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12)","maxspeed:hgv:conditional":"100 @ (articulated AND weightrating>22)"}],["rural",{"maxspeed":"100","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12)","maxspeed:hgv:conditional":"100 @ (articulated AND weightrating>22)"}]],
+        "AU-WA": [["pedestrian zone",{"maxspeed":"10"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"110","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12); 100 @ (trailer)"}],["rural",{"maxspeed":"110","maxspeed:bus:conditional":"100 @ (weightrating>5)","maxspeed:conditional":"100 @ (weightrating>12); 100 @ (trailer)"}]],
+        "AW": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"80"}],["rural",{"maxspeed":"80"}]],
+        "AZ": [["service road",{"maxspeed":"20"}],["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"60"}],["",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:coach":"90","maxspeed:goods":"90","maxspeed:hgv":"70"}],["rural",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:coach":"90","maxspeed:goods":"90","maxspeed:hgv":"70"}],["motorway",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:coach":"90","maxspeed:goods":"110","maxspeed:hgv":"90"}]],
+        "BA": [["living street",{"maxspeed":"walk"}],["urban",{"maxspeed":"50","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>7.5); 70 @ (trailer)"}],["",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>7.5); 70 @ (trailer)"}],["rural",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>7.5); 70 @ (trailer)"}],["motorroad",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>7.5); 70 @ (trailer)"}],["motorway",{"maxspeed":"130","maxspeed:bus":"100","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>7.5); 70 @ (trailer)"}]],
+        "BB": [["",{"maxspeed":"60","maxspeed:bus":"50","maxspeed:coach":"50","maxspeed:conditional":"50 @ (weightrating>3); 30 @ (trailer)","maxspeed:hgv":"50"}]],
+        "BE-BRU": [["pedestrian zone",{"maxspeed":"walk"}],["living street",{"maxspeed":"20"}],["cycle street",{"maxspeed":"30"}],["urban",{"maxspeed":"30"}],["",{"maxspeed":"70"}],["rural",{"maxspeed":"70"}],["rural single carriageway with 2 or more lanes in each direction",{"maxspeed":"70"}],["rural dual carriageway with 2 or more lanes in each direction",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:conditional":"90 @ (weightrating>3.5)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:coach":"100","maxspeed:conditional":"90 @ (weightrating>3.5)"}]],
+        "BE-VLG": [["pedestrian zone",{"maxspeed":"walk"}],["living street",{"maxspeed":"20"}],["cycle street",{"maxspeed":"30"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"70"}],["rural",{"maxspeed":"70"}],["rural single carriageway with 2 or more lanes in each direction",{"maxspeed":"70"}],["rural dual carriageway with 2 or more lanes in each direction",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:conditional":"90 @ (weightrating>3.5)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:coach":"100","maxspeed:conditional":"90 @ (weightrating>3.5)"}],["Flanders:Jaagpad",{"maxspeed":"30"}]],
+        "BE-WAL": [["pedestrian zone",{"maxspeed":"walk"}],["living street",{"maxspeed":"20"}],["cycle street",{"maxspeed":"30"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90"}],["rural",{"maxspeed":"90"}],["rural single carriageway with 2 or more lanes in each direction",{"maxspeed":"90"}],["rural dual carriageway with 2 or more lanes in each direction",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:conditional":"90 @ (weightrating>3.5)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:coach":"100","maxspeed:conditional":"90 @ (weightrating>3.5)"}]],
+        "BF": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"90","maxspeed:conditional":"90 @ (weightrating>10)"}],["rural",{"maxspeed":"90","maxspeed:bus":"90","maxspeed:conditional":"90 @ (weightrating>10)"}]],
+        "BG": [["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"50","maxspeed:bus":"50","maxspeed:hgv":"50"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"80 @ (weightrating>3.5); 70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer); 70 @ (articulated)"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"80 @ (weightrating>3.5); 70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer); 70 @ (articulated)"}],["motorroad",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:conditional":"90 @ (weightrating>3.5); 90 @ (trailer)","maxspeed:hgv":"90"}],["motorway",{"maxspeed":"140","maxspeed:bus":"100","maxspeed:conditional":"100 @ (weightrating>3.5); 100 @ (trailer)","maxspeed:hgv":"100"}]],
+        "BH": [["urban",{"maxspeed":"60","maxspeed:bus":"50","maxspeed:goods":"50"}],["",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:goods":"80"}],["rural",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:goods":"80"}]],
+        "BI": [["urban",{"maxspeed":"50","maxspeed:bus":"40"}],["",{"maxspeed":"80","maxspeed:bus":"70","maxspeed:conditional":"50 @ (weightrating>10)"}],["rural",{"maxspeed":"80","maxspeed:bus":"70","maxspeed:conditional":"50 @ (weightrating>10)"}],["rural dual carriageway",{"maxspeed":"100","maxspeed:bus":"70","maxspeed:conditional":"90 @ (weightrating>10)"}]],
+        "BJ": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:hgv:conditional":"90 @ (weightrating>10)"}],["rural road with asphalt or concrete surface",{"maxspeed":"90","maxspeed:hgv:conditional":"90 @ (weightrating>10)"}],["Benin: Route nationale",{"maxspeed":"90","maxspeed:hgv:conditional":"90 @ (weightrating>10)"}],["motorway",{"maxspeed":"110","maxspeed:hgv:conditional":"90 @ (weightrating>10)"}]],
+        "BN": [["urban",{"maxspeed":"60"}],["",{"maxspeed:bus":"80","maxspeed:bus:conditional":"75 @ (trailer)","maxspeed:conditional":"75 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"75 @ (weightrating>7.5); 75 @ (trailer); 75 @ (articulated)"}],["rural",{"maxspeed:bus":"80","maxspeed:bus:conditional":"75 @ (trailer)","maxspeed:conditional":"75 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"75 @ (weightrating>7.5); 75 @ (trailer); 75 @ (articulated)"}]],
+        "BO": [["school zone",{"maxspeed":"10"}],["pedestrian zone",{"maxspeed":"20"}],["urban",{"maxspeed":"40"}],["",{"maxspeed":"80"}],["rural road with asphalt or concrete surface",{"maxspeed":"80"}],["rural road without asphalt or concrete surface",{"maxspeed":"70"}]],
+        "BR": [["Brasil: Via urbana local",{"maxspeed":"30"}],["Brasil: Via urbana coletora",{"maxspeed":"40"}],["Brasil: Via urbana arterial",{"maxspeed":"60"}],["Brasil: Via urbana de trânsito rápido",{"maxspeed":"80"}],["",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:goods":"100","maxspeed:hgv":"90"}],["Brasil: Rodovia rural de pista simples",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:goods":"100","maxspeed:hgv":"90"}],["Brasil: Rodovia rural de pista dupla",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:goods":"110","maxspeed:hgv":"90"}],["Brasil: Estrada rural",{"maxspeed":"60"}]],
+        "BS": [["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"45 mph"}],["rural",{"maxspeed":"45 mph"}]],
+        "BS-NP": [["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"30 mph"}],["rural",{"maxspeed":"30 mph"}]],
+        "BT": [["urban",{"maxspeed":"30"}],["",{"maxspeed":"50","maxspeed:bus":"35","maxspeed:goods":"50","maxspeed:goods:conditional":"35 @ (weightrating>3)"}],["rural",{"maxspeed":"50","maxspeed:bus":"35","maxspeed:goods":"50","maxspeed:goods:conditional":"35 @ (weightrating>3)"}]],
+        "BW": [["living street",{"maxspeed":"30"}],["urban",{"maxspeed":"60","maxspeed:bus":"80","maxspeed:bus:conditional":"100 @ (length>10); 100 @ (seats>=15); 80 @ (trailer); 80 @ (articulated)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)","maxspeed:hgv":"80"}],["",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:bus:conditional":"100 @ (length>10); 100 @ (seats>=15); 80 @ (trailer); 80 @ (articulated)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)","maxspeed:hgv":"80"}],["rural",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:bus:conditional":"100 @ (length>10); 100 @ (seats>=15); 80 @ (trailer); 80 @ (articulated)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)","maxspeed:hgv":"80"}]],
+        "BY": [["living street",{"maxspeed":"20"}],["pedestrian zone",{"maxspeed":"20"}],["urban",{"maxspeed":"60"}],["",{"maxspeed":"90","maxspeed:bus":"90","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"70 @ (trailer)","maxspeed:hgv":"70"}],["rural",{"maxspeed":"90","maxspeed:bus":"90","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"70 @ (trailer)","maxspeed:hgv":"70"}],["motorway",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:conditional":"90 @ (trailer)","maxspeed:hgv":"90"}]],
+        "CA-AB": [["playground zone",{"maxspeed":"30"}],["school zone",{"maxspeed":"30"}],["Alberta: Urban road",{"maxspeed":"50"}],["Alberta: Urban provincial highway",{"maxspeed":"80"}],["",{"maxspeed":"80"}],["rural",{"maxspeed":"80"}],["Alberta: Provincial highway",{"maxspeed":"100"}]],
+        "CA-BC": [["playground zone",{"maxspeed":"50","maxspeed:conditional":"30 @ (dawn-dusk)"}],["school zone",{"maxspeed":"50","maxspeed:conditional":"30 @ (Mo-Fr 08:00-17:00; PH,SH off)"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"80"}],["rural",{"maxspeed":"80"}]],
+        "CA-MB": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"90"}],["rural",{"maxspeed":"90"}]],
+        "CA-NB": [["urban school zone",{"maxspeed":"50","maxspeed:conditional":"30 @ (07:30-16:00)"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"80"}],["rural",{"maxspeed":"80"}],["rural school zone",{"maxspeed":"80","maxspeed:conditional":"50 @ (07:30-16:00)"}]],
+        "CA-NL": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"80"}],["rural",{"maxspeed":"80"}],["rural school zone",{"maxspeed":"80","maxspeed:conditional":"50 @ (07:00-17:00)"}],["rural road without asphalt or concrete surface",{"maxspeed":"60"}],["Newfoundland and Labrador: Trans-Canada highway",{"maxspeed":"100"}]],
+        "CA-NS": [["urban school zone",{"maxspeed":"30"}],["business district",{"maxspeed":"50"}],["residential district",{"maxspeed":"50"}],["urban public park",{"maxspeed":"50"}],["",{"maxspeed":"80"}],["rural",{"maxspeed":"80"}],["rural school zone",{"maxspeed":"50"}]],
+        "CA-NT": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"90"}],["rural",{"maxspeed":"90"}]],
+        "CA-NU": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"90"}],["rural",{"maxspeed":"90"}]],
+        "CA-ON": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"80"}],["rural",{"maxspeed":"80"}]],
+        "CA-PE": [["urban",{"maxspeed":"50"}],["business district",{"maxspeed":"60"}],["",{"maxspeed":"100","maxspeed:conditional":"90 @ (sunset-sunrise)"}],["rural",{"maxspeed":"100","maxspeed:conditional":"90 @ (sunset-sunrise)"}],["rural school zone",{"maxspeed":"100","maxspeed:conditional":"60 @ (Sep-Jun Mo-Fr 08:00-16:00)"}],["rural road without asphalt or concrete surface",{"maxspeed":"80"}]],
+        "CA-QC": [["pedestrian zone",{"maxspeed":"20"}],["cycle street",{"maxspeed":"30"}],["urban",{"maxspeed":"50"}],["school zone",{"maxspeed":"90","maxspeed:conditional":"50 @ (Sep-Jun Mo-Fr 08:00-16:00)"}],["",{"maxspeed":"90"}],["rural",{"maxspeed":"90"}],["rural road without asphalt or concrete surface",{"maxspeed":"70"}],["Quebec: Autoroute",{"maxspeed":"100"}]],
+        "CA-SK": [["",{"maxspeed":"80"}]],
+        "CA-YT": [["urban playground zone",{"maxspeed":"30"}],["rural playground zone",{"maxspeed":"40"}],["urban school zone",{"maxspeed":"50","maxspeed:conditional":"30 @ (Mo-Fr 08:00-16:30)"}],["rural school zone",{"maxspeed":"50","maxspeed:conditional":"40 @ (Mo-Fr 08:00-16:30)"}],["",{"maxspeed":"50"}]],
+        "CD": [["urban",{"maxspeed":"60"}],["",{"maxspeed":"90","maxspeed:bus":"75"}],["rural",{"maxspeed":"90","maxspeed:bus":"75"}],["dual carriageway with 2 or more lanes in each direction",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:conditional":"90 @ (weightrating>7.5)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:conditional":"90 @ (weightrating>7.5)"}]],
+        "CF": [["urban",{"maxspeed":"60","maxspeed:conditional":"40 @ (weightrating>3.5)"}],["",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (weightrating>3.5); 60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)"}],["rural",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (weightrating>3.5); 60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)"}]],
+        "CG": [["urban",{"maxspeed":"60","maxspeed:conditional":"40 @ (weightrating>3.5)"}],["",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (weightrating>3.5); 60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)"}],["rural",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (weightrating>3.5); 60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)"}]],
+        "CH": [["pedestrian zone",{"maxspeed":"walk"}],["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"50","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"80 @ (trailer); 80 @ (articulated)"}],["",{"maxspeed":"80","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"80 @ (trailer); 80 @ (articulated)"}],["rural",{"maxspeed":"80","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"80 @ (trailer); 80 @ (articulated)"}],["motorroad",{"maxspeed":"100","maxspeed:bus":"100","maxspeed:bus:conditional":"80 @ (trailer)","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"80 @ (trailer); 80 @ (articulated)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:bus:conditional":"80 @ (trailer)","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"80 @ (trailer); 80 @ (articulated)"}]],
+        "CI": [["urban",{"maxspeed":"70","maxspeed:bus":"50","maxspeed:hgv":"50"}],["",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (weightrating>16)"}],["rural",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (weightrating>16)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (weightrating>16)"}]],
+        "CL": [["school zone",{"maxspeed":"30"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:coach":"100","maxspeed:hgv":"100","maxspeed:hgv:conditional":"90 @ (weightrating>3.86)"}],["rural",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:coach":"100","maxspeed:hgv":"100","maxspeed:hgv:conditional":"90 @ (weightrating>3.86)"}],["rural road with 2 or more lanes in each direction",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:coach":"100","maxspeed:hgv":"100","maxspeed:hgv:conditional":"90 @ (weightrating>3.86)"}]],
+        "CM": [["urban",{"maxspeed":"60","maxspeed:conditional":"40 @ (weightrating>3.5)"}],["",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (weightrating>3.5); 60 @ (weightrating>12); 60 @ (trailerweight>0.75)"}],["rural",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (weightrating>3.5); 60 @ (weightrating>12); 60 @ (trailerweight>0.75)"}]],
+        "CN": [["urban and without centerline",{"maxspeed":"30"}],["without centerline",{"maxspeed":"40"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"70"}],["motorway",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:goods":"100"}]],
+        "CO": [["residential district",{"maxspeed":"30"}],["school zone",{"maxspeed":"30"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:goods":"80"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:goods":"80"}],["motorway",{"maxspeed":"120","maxspeed:bus":"80","maxspeed:goods":"80"}]],
+        "CR": [["roundabout",{"maxspeed":"30"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"60"}],["rural",{"maxspeed":"60"}]],
+        "CU": [["service road",{"maxspeed":"20"}],["urban school zone",{"maxspeed":"40"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:conditional":"70 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)"}],["rural",{"maxspeed":"90","maxspeed:conditional":"70 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)"}],["rural school zone",{"maxspeed":"60","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)"}],["rural unpaved road",{"maxspeed":"60","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)"}],["motorway",{"maxspeed":"100","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods":"90","maxspeed:goods:conditional":"80 @ (trailer)"}]],
+        "CV": [["urban",{"maxspeed":"50","maxspeed:hgv":"50","maxspeed:hgv:conditional":"40 @ (trailer)"}],["",{"maxspeed":"90","maxspeed:conditional":"80 @ (weightrating>3.5); 70 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["rural",{"maxspeed":"90","maxspeed:conditional":"80 @ (weightrating>3.5); 70 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["motorroad",{"maxspeed":"100","maxspeed:conditional":"90 @ (weightrating>3.5); 90 @ (weightrating>3.5 AND trailer); 80 @ (trailer)","maxspeed:goods":"90","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["motorway",{"maxspeed":"120","maxspeed:conditional":"100 @ (weightrating>3.5); 100 @ (trailer); 90 @ (weightrating>3.5 AND trailer)","maxspeed:goods":"110","maxspeed:goods:conditional":"90 @ (trailer)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (trailer)"}]],
+        "CW": [["urban",{"maxspeed":"40"}],["",{"maxspeed":"60"}],["rural",{"maxspeed":"60"}],["motorroad",{"maxspeed":"80"}]],
+        "CY": [["urban",{"maxspeed":"50","maxspeed:hgv":"50"}],["",{"maxspeed":"80","maxspeed:hgv":"64"}],["rural",{"maxspeed":"80","maxspeed:hgv":"64"}],["motorway",{"maxspeed":"100","maxspeed:hgv":"80"}]],
+        "CZ": [["living street",{"maxspeed":"20"}],["pedestrian zone",{"maxspeed":"20"}],["cycle street",{"maxspeed":"30"}],["urban motorroad",{"maxspeed":"80"}],["urban motorway",{"maxspeed":"80"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"90","maxspeed:conditional":"80 @ (weightrating>3.5)"}],["rural",{"maxspeed":"90","maxspeed:bus":"90","maxspeed:conditional":"80 @ (weightrating>3.5)"}],["rural motorroad with single carriageway",{"maxspeed":"90","maxspeed:bus":"90"}],["rural motorroad",{"maxspeed":"110","maxspeed:bus":"110","maxspeed:conditional":"80 @ (weightrating>3.5)"}],["rural motorway",{"maxspeed":"130","maxspeed:bus":"130","maxspeed:conditional":"80 @ (weightrating>3.5)"}]],
+        "DE": [["living street",{"maxspeed":"walk"}],["pedestrian zone",{"maxspeed":"walk"}],["footway",{"maxspeed":"walk"}],["cycle street",{"maxspeed":"30"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:bus:conditional":"60 @ (weightrating>7.5); 60 @ (trailer)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5); 60 @ (weightrating>7.5)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"60 @ (weightrating>7.5)"}],["rural",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:bus:conditional":"60 @ (weightrating>7.5); 60 @ (trailer)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5); 60 @ (weightrating>7.5)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"60 @ (weightrating>7.5)"}],["rural dual carriageway",{"maxspeed:advisory":"130","maxspeed:bus":"80","maxspeed:bus:conditional":"60 @ (weightrating>7.5); 60 @ (trailer)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5); 60 @ (weightrating>7.5)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"60 @ (weightrating>7.5)"}],["rural road with 2 or more lanes in each direction",{"maxspeed:advisory":"130","maxspeed:bus":"80","maxspeed:bus:conditional":"60 @ (weightrating>7.5); 60 @ (trailer)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5); 60 @ (weightrating>7.5)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"60 @ (weightrating>7.5)"}],["motorway",{"maxspeed:advisory":"130","maxspeed:bus":"80","maxspeed:bus:conditional":"60 @ (trailer)","maxspeed:coach":"100","maxspeed:coach:conditional":"60 @ (trailer)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"60 @ (trailers>=2)"}]],
+        "DK": [["living street",{"maxspeed":"15"}],["cycle street",{"maxspeed":"30"}],["urban",{"maxspeed":"50","maxspeed:bus":"80","maxspeed:bus:conditional":"80 @ (weightrating>3.5)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)","maxspeed:hgv":"80"}],["",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:bus:conditional":"80 @ (weightrating>3.5)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)","maxspeed:hgv":"80"}],["rural",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:bus:conditional":"80 @ (weightrating>3.5)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)","maxspeed:hgv":"80"}],["motorroad",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:bus:conditional":"80 @ (weightrating>3.5)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)","maxspeed:hgv":"80"}],["motorway",{"maxspeed":"130","maxspeed:bus":"130","maxspeed:bus:conditional":"80 @ (weightrating>3.5)","maxspeed:coach":"100","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)","maxspeed:hgv":"80"}]],
+        "DO": [["school zone",{"maxspeed":"35","maxspeed:conditional":"25 @ (06:00-18:00)"}],["urban",{"maxspeed":"35"}],["",{"maxspeed":"60","maxspeed:bus":"50","maxspeed:conditional":"50 @ (weightcapacity>2); 50 @ (emptyweight>2)"}],["rural",{"maxspeed":"60","maxspeed:bus":"50","maxspeed:conditional":"50 @ (weightcapacity>2); 50 @ (emptyweight>2)"}]],
+        "EC": [["school zone",{"maxspeed":"20"}],["urban",{"maxspeed":"50","maxspeed:bus":"40"}],["Ecuador: Via perimetral",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:hgv":"70","maxspeed:hgv:conditional":"50 @ (trailer)"}],["",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:hgv":"70","maxspeed:hgv:conditional":"50 @ (trailer)"}],["rural",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:hgv":"70","maxspeed:hgv:conditional":"50 @ (trailer)"}]],
+        "EE": [["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:conditional":"50 @ (trailer)"}],["rural",{"maxspeed":"90","maxspeed:conditional":"50 @ (trailer)"}]],
+        "EG": [["residential district",{"maxspeed":"40"}],["business district",{"maxspeed":"40"}],["urban",{"maxspeed":"60"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:conditional":"60 @ (articulated); 60 @ (trailer)","maxspeed:goods":"70"}],["Egypt: \"الطرق السريعة أو الرئيسية التى تربط المحافظات ، والتى تتبع المحليات أو الهيئة العامة للطرق والكبارى\"",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:conditional":"60 @ (articulated); 60 @ (trailer)","maxspeed:goods":"70"}],["Egypt: \"الطرق الصحراوية\"",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:conditional":"70 @ (articulated); 70 @ (trailer)","maxspeed:goods":"80"}]],
+        "ES": [["living street",{"maxspeed":"10"}],["urban road without sidewalk",{"maxspeed":"20"}],["unpaved road",{"maxspeed":"30"}],["urban motorway",{"maxspeed":"80"}],["urban road with 2 or more lanes in each direction",{"maxspeed":"50"}],["Spain: Travesía",{"maxspeed":"50"}],["urban",{"maxspeed":"30"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:conditional":"80 @ (trailer); 80 @ (articulated)","maxspeed:hgv":"80"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:conditional":"80 @ (trailer); 80 @ (articulated)","maxspeed:hgv":"80"}],["motorway",{"maxspeed":"120","maxspeed:bus":"80","maxspeed:conditional":"90 @ (trailer); 90 @ (articulated)","maxspeed:hgv":"90"}]],
+        "FI": [["living street",{"maxspeed":"20"}],["pedestrian zone",{"maxspeed":"20"}],["urban",{"maxspeed":"50","maxspeed:bus":"80","maxspeed:coach":"100","maxspeed:coach:conditional":"80 @ (trailer)","maxspeed:conditional":"100 @ (trailer); 80 @ (trailerweight>0.75)","maxspeed:hgv":"80"}],["",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:coach":"100","maxspeed:coach:conditional":"80 @ (trailer)","maxspeed:conditional":"100 @ (trailer); 80 @ (trailerweight>0.75)","maxspeed:hgv":"80"}],["rural",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:coach":"100","maxspeed:coach:conditional":"80 @ (trailer)","maxspeed:conditional":"100 @ (trailer); 80 @ (trailerweight>0.75)","maxspeed:hgv":"80"}]],
+        "FJ": [["urban",{"maxspeed":"50","maxspeed:bus":"60","maxspeed:conditional":"60 @ (trailer); 50 @ (trailerweight>2.035)","maxspeed:goods:conditional":"60 @ (weight>2.035); 50 @ (weight>2.035 AND trailer); 60 @ (weight>2.035 AND trailerweight>2.035); 40 @ (weight>3.050 AND trailer); 60 @ (weight>3.050 AND trailerweight>1.525); 25 @ (trailers>=2)"}],["",{"maxspeed":"80","maxspeed:bus":"60","maxspeed:conditional":"60 @ (trailer); 50 @ (trailerweight>2.035)","maxspeed:goods:conditional":"60 @ (weight>2.035); 50 @ (weight>2.035 AND trailer); 60 @ (weight>2.035 AND trailerweight>2.035); 40 @ (weight>3.050 AND trailer); 60 @ (weight>3.050 AND trailerweight>1.525); 25 @ (trailers>=2)"}],["rural",{"maxspeed":"80","maxspeed:bus":"60","maxspeed:conditional":"60 @ (trailer); 50 @ (trailerweight>2.035)","maxspeed:goods:conditional":"60 @ (weight>2.035); 50 @ (weight>2.035 AND trailer); 60 @ (weight>2.035 AND trailerweight>2.035); 40 @ (weight>3.050 AND trailer); 60 @ (weight>3.050 AND trailerweight>1.525); 25 @ (trailers>=2)"}]],
+        "FM": [["",{"maxspeed":"25 mph"}]],
+        "FM-KSA": [["school zone",{"maxspeed":"15 mph"}],["urban",{"maxspeed":"20 mph"}],["",{"maxspeed":"25 mph"}],["rural",{"maxspeed":"25 mph"}]],
+        "FM-PNI": [["",{"maxspeed":"25 mph"}]],
+        "FM-TRK": [["school zone",{"maxspeed":"20 mph","maxspeed:conditional":"15 mph @ (Mo-Fr 08:00-15:30)"}],["urban",{"maxspeed":"20 mph"}],["",{"maxspeed":"25 mph"}],["rural",{"maxspeed":"25 mph"}]],
+        "FM-YAP": [["school zone",{"maxspeed":"20 mph","maxspeed:conditional":"15 mph @ (Mo-Fr 08:00-15:30)"}],["urban",{"maxspeed":"20 mph"}],["",{"maxspeed":"25 mph"}],["rural",{"maxspeed":"25 mph"}]],
+        "FR": [["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"50","maxspeed:bus:conditional":"80 @ (weightrating>3.5)","maxspeed:hgv":"70"}],["",{"maxspeed":"80","maxspeed:bus:conditional":"80 @ (weightrating>3.5)","maxspeed:conditional":"80 @ (wet); 60 @ (trailer AND weightrating>12); 60 @ (articulated AND weightrating>12)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (weightrating>12)"}],["rural",{"maxspeed":"80","maxspeed:bus:conditional":"80 @ (weightrating>3.5)","maxspeed:conditional":"80 @ (wet); 60 @ (trailer AND weightrating>12); 60 @ (articulated AND weightrating>12)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (weightrating>12)"}],["rural road with 2 or more lanes in each direction",{"maxspeed":"90","maxspeed:bus":"90","maxspeed:bus:conditional":"80 @ (weightrating>3.5)","maxspeed:conditional":"80 @ (wet); 60 @ (trailer AND weightrating>12); 60 @ (articulated AND weightrating>12)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (weightrating>12)"}],["rural dual carriageway",{"maxspeed":"110","maxspeed:bus":"100","maxspeed:bus:conditional":"100 @ (weightrating>3.5); 90 @ (weightrating>10)","maxspeed:conditional":"100 @ (wet); 90 @ (weightrating>3.5); 80 @ (weightrating>12)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (weightrating>12)"}],["motorway",{"maxspeed":"130","maxspeed:bus":"100","maxspeed:bus:conditional":"110 @ (weightrating>3.5); 90 @ (weightrating>10)","maxspeed:coach":"100","maxspeed:conditional":"110 @ (wet); 90 @ (weightrating>3.5)","maxspeed:hgv":"90"}]],
+        "GA": [["urban",{"maxspeed":"60","maxspeed:conditional":"40 @ (weightrating>3.5)"}],["",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (weightrating>3.5); 60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)"}],["rural",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (weightrating>3.5); 60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)"}]],
+        "GB": [["United Kingdom: restricted road",{"maxspeed":"30 mph","maxspeed:bus":"50 mph","maxspeed:conditional":"50 mph @ (trailer); 20 mph @ (trailers>=2)","maxspeed:hgv":"50 mph"}],["",{"maxspeed":"60 mph","maxspeed:bus":"50 mph","maxspeed:conditional":"50 mph @ (trailer); 20 mph @ (trailers>=2)","maxspeed:hgv":"50 mph"}],["rural",{"maxspeed":"60 mph","maxspeed:bus":"50 mph","maxspeed:conditional":"50 mph @ (trailer); 20 mph @ (trailers>=2)","maxspeed:hgv":"50 mph"}],["dual carriageway",{"maxspeed":"70 mph","maxspeed:bus":"60 mph","maxspeed:conditional":"60 mph @ (trailer); 20 mph @ (trailers>=2)","maxspeed:hgv":"60 mph"}],["motorway",{"maxspeed":"70 mph","maxspeed:bus":"70 mph","maxspeed:bus:conditional":"60 mph @ (length>12)","maxspeed:conditional":"60 mph @ (trailer); 40 mph @ (trailers>=2)","maxspeed:hgv":"70 mph","maxspeed:hgv:conditional":"60 mph @ (weightrating>7.5); 60 mph @ (articulated)"}]],
+        "GB-SCT": [["United Kingdom: restricted road",{"maxspeed":"30 mph","maxspeed:bus":"50 mph","maxspeed:conditional":"50 mph @ (trailer); 20 mph @ (trailers>=2)","maxspeed:hgv":"50 mph","maxspeed:hgv:conditional":"40 mph @ (weightrating>7.5)"}],["",{"maxspeed":"60 mph","maxspeed:bus":"50 mph","maxspeed:conditional":"50 mph @ (trailer); 20 mph @ (trailers>=2)","maxspeed:hgv":"50 mph","maxspeed:hgv:conditional":"40 mph @ (weightrating>7.5)"}],["rural",{"maxspeed":"60 mph","maxspeed:bus":"50 mph","maxspeed:conditional":"50 mph @ (trailer); 20 mph @ (trailers>=2)","maxspeed:hgv":"50 mph","maxspeed:hgv:conditional":"40 mph @ (weightrating>7.5)"}],["dual carriageway",{"maxspeed":"70 mph","maxspeed:bus":"60 mph","maxspeed:conditional":"60 mph @ (trailer); 20 mph @ (trailers>=2)","maxspeed:hgv":"60 mph","maxspeed:hgv:conditional":"50 mph @ (weightrating>7.5)"}],["motorway",{"maxspeed":"70 mph","maxspeed:bus":"70 mph","maxspeed:bus:conditional":"60 mph @ (length>12)","maxspeed:conditional":"60 mph @ (trailer); 40 mph @ (trailers>=2)","maxspeed:hgv":"70 mph","maxspeed:hgv:conditional":"60 mph @ (weightrating>7.5); 60 mph @ (articulated)"}]],
+        "GD": [["urban",{"maxspeed":"20 mph"}],["",{"maxspeed":"40 mph","maxspeed:bus":"35 mph","maxspeed:goods":"35 mph"}],["rural",{"maxspeed":"40 mph","maxspeed:bus":"35 mph","maxspeed:goods":"35 mph"}]],
+        "GE": [["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"60","maxspeed:bus":"70","maxspeed:conditional":"70 @ (weightrating>3.5); 80 @ (trailer); 70 @ (trailerweight>0.75)"}],["",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:conditional":"70 @ (weightrating>3.5); 80 @ (trailer); 70 @ (trailerweight>0.75)"}],["rural",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:conditional":"70 @ (weightrating>3.5); 80 @ (trailer); 70 @ (trailerweight>0.75)"}],["motorway",{"maxspeed":"110","maxspeed:bus":"80","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (trailer); 70 @ (trailerweight>0.75); 80 @ (weightrating>3.5 AND trailerweight>0.75)"}]],
+        "GG": [["",{"maxspeed":"35 mph","maxspeed:conditional":"25 mph @ (articulated); 25 mph @ (emptyweight>2); 20 mph @ (trailer)"}]],
+        "GH": [["pedestrian zone",{"maxspeed":"30"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:hgv":"75","maxspeed:hgv:conditional":"80 @ (empty)"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:hgv":"75","maxspeed:hgv:conditional":"80 @ (empty)"}],["motorway",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:hgv":"75","maxspeed:hgv:conditional":"80 @ (empty)"}]],
+        "GQ": [["urban",{"maxspeed":"60","maxspeed:conditional":"40 @ (weightrating>3.5)"}],["",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (weightrating>3.5); 60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)"}],["rural",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (weightrating>3.5); 60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)"}]],
+        "GR": [["pedestrian zone",{"maxspeed":"walk"}],["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"30"}],["urban road with 2 or more lanes in each direction",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (articulated); 70 @ (trailer)"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (articulated); 70 @ (trailer)"}],["motorroad",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"80 @ (trailer)","maxspeed:conditional":"90 @ (trailer); 80 @ (trailerweight>0.75)","maxspeed:goods":"90","maxspeed:goods:conditional":"85 @ (trailer); 80 @ (trailerweight>0.75)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (articulated); 70 @ (trailer)"}],["motorway",{"maxspeed":"130","maxspeed:bus":"100","maxspeed:bus:conditional":"80 @ (trailer)","maxspeed:conditional":"100 @ (trailer); 90 @ (trailerweight>0.75)","maxspeed:goods":"100","maxspeed:goods:conditional":"85 @ (trailer); 80 @ (trailerweight>0.75)","maxspeed:hgv":"85","maxspeed:hgv:conditional":"80 @ (articulated); 80 @ (trailer)"}]],
+        "GT": [["school zone",{"maxspeed":"30","maxspeed:conditional":"20 @ (trailer); 20 @ (weightrating>3.5)"}],["Guatemala: Vía residencial",{"maxspeed":"30","maxspeed:conditional":"20 @ (trailer); 20 @ (weightrating>3.5)"}],["Guatemala: Vía local",{"maxspeed":"40","maxspeed:conditional":"30 @ (trailer); 30 @ (weightrating>3.5)"}],["Guatemala: Camino",{"maxspeed":"40","maxspeed:conditional":"30 @ (trailer); 30 @ (weightrating>3.5)"}],["Guatemala: Arteria secundaria",{"maxspeed":"50","maxspeed:conditional":"40 @ (trailer); 40 @ (weightrating>3.5)"}],["Guatemala: Arteria principal",{"maxspeed":"60","maxspeed:conditional":"50 @ (trailer); 50 @ (weightrating>3.5)"}],["Guatemala: Vía rápida urbana",{"maxspeed":"80","maxspeed:conditional":"70 @ (trailer); 70 @ (weightrating>3.5)"}],["urban motorway",{"maxspeed":"90","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)"}],["",{"maxspeed":"60","maxspeed:conditional":"50 @ (trailer); 50 @ (weightrating>3.5)"}],["Guatemala: Carretera secundaria",{"maxspeed":"60","maxspeed:conditional":"50 @ (trailer); 50 @ (weightrating>3.5)"}],["Guatemala: Carretera principal",{"maxspeed":"80","maxspeed:conditional":"60 @ (trailer); 60 @ (weightrating>3.5)"}],["Guatemala: Vía rápida",{"maxspeed":"90","maxspeed:conditional":"70 @ (trailer); 70 @ (weightrating>3.5)"}],["rural motorway",{"maxspeed":"100","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)"}]],
+        "GU": [["",{"maxspeed":"45 mph"}]],
+        "GY": [["urban",{"maxspeed":"30 mph"}],["",{"maxspeed":"40 mph","maxspeed:bus":"40 mph","maxspeed:hgv":"40 mph"}],["rural",{"maxspeed":"40 mph","maxspeed:bus":"40 mph","maxspeed:hgv":"40 mph"}],["Guyana: Timehri Field / Linden Highway",{"maxspeed":"60 mph","maxspeed:bus":"40 mph","maxspeed:conditional":"40 mph @ (emptyweight>1.270)","maxspeed:hgv":"40 mph"}]],
+        "HK": [["",{"maxspeed":"50","maxspeed:bus":"70","maxspeed:hgv:conditional":"70 @ (weightrating>5.5)"}]],
+        "HR": [["living street",{"maxspeed":"walk"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)"}],["Croatia:brza cesta",{"maxspeed":"110","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)"}],["motorroad",{"maxspeed":"110","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer); 80 @ (weightrating>3.5)"}],["motorway",{"maxspeed":"130","maxspeed:bus":"100","maxspeed:conditional":"90 @ (trailer); 90 @ (weightrating>3.5)"}]],
+        "HT": [["urban",{"maxspeed":"50"}]],
+        "HU": [["pedestrian zone",{"maxspeed":"10"}],["living street",{"maxspeed":"20"}],["cycle street",{"maxspeed":"30"}],["urban",{"maxspeed":"50","maxspeed:bus":"70","maxspeed:hgv":"70"}],["",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:conditional":"70 @ (weightrating>3.5); 70 @ (trailer)","maxspeed:hgv":"70"}],["rural",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:conditional":"70 @ (weightrating>3.5); 70 @ (trailer)","maxspeed:hgv":"70"}],["motorroad",{"maxspeed":"110","maxspeed:bus":"70","maxspeed:conditional":"70 @ (weightrating>3.5); 70 @ (trailer)","maxspeed:hgv":"70"}],["motorway",{"maxspeed":"130","maxspeed:bus":"100","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (trailer)","maxspeed:hgv":"80"}]],
+        "ID": [["residential district",{"maxspeed":"30"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"80"}],["rural",{"maxspeed":"80"}],["urban motorway",{"maxspeed":"80"}],["rural motorway",{"maxspeed":"100"}]],
+        "IE": [["urban",{"maxspeed":"50","maxspeed:bus":"80","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (trailer)","maxspeed:hgv":"80"}],["",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (trailer)","maxspeed:hgv":"80"}],["rural",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (trailer)","maxspeed:hgv":"80"}],["Ireland: National road",{"maxspeed":"100","maxspeed:bus":"100","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (trailer)","maxspeed:hgv":"80"}],["motorway",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (trailer)","maxspeed:hgv":"90"}]],
+        "IL": [["living street",{"maxspeed":"30"}],["urban",{"maxspeed":"50","maxspeed:hgv:conditional":"80 @ (weightrating>12)"}],["",{"maxspeed":"80","maxspeed:hgv:conditional":"80 @ (weightrating>12)"}],["rural",{"maxspeed":"80","maxspeed:hgv:conditional":"80 @ (weightrating>12)"}],["rural dual carriageway",{"maxspeed":"90","maxspeed:hgv:conditional":"80 @ (weightrating>12)"}],["motorway",{"maxspeed":"110","maxspeed:bus":"100","maxspeed:hgv:conditional":"80 @ (weightrating>12)"}]],
+        "IM": [["living street",{"maxspeed":"20 mph"}],["urban",{"maxspeed":"30 mph","maxspeed:bus":"40 mph","maxspeed:conditional":"20 mph @ (trailers>=2); 40 mph @ (trailer); 40 mph @ (weightrating>32.52 AND articulated); 20 mph @ (trailers>=2)","maxspeed:goods":"60 mph","maxspeed:hgv":"50 mph","maxspeed:hgv:conditional":"40 mph @ (weightrating>7.5)"}],["",{"maxspeed":"60 mph","maxspeed:bus":"40 mph","maxspeed:conditional":"40 mph @ (trailer); 40 mph @ (weightrating>32.52 AND articulated); 20 mph @ (trailers>=2)","maxspeed:goods":"60 mph","maxspeed:hgv":"50 mph","maxspeed:hgv:conditional":"40 mph @ (weightrating>7.5)"}],["rural",{"maxspeed":"60 mph","maxspeed:bus":"40 mph","maxspeed:conditional":"40 mph @ (trailer); 40 mph @ (weightrating>32.52 AND articulated); 20 mph @ (trailers>=2)","maxspeed:goods":"60 mph","maxspeed:hgv":"50 mph","maxspeed:hgv:conditional":"40 mph @ (weightrating>7.5)"}]],
+        "IN": [["urban",{"maxspeed":"70","maxspeed:bus":"60","maxspeed:goods":"60"}],["",{"maxspeed":"70","maxspeed:bus":"60","maxspeed:goods":"60"}],["rural",{"maxspeed":"70","maxspeed:bus":"60","maxspeed:goods":"60"}],["rural dual carriageway with 2 or more lanes in each direction",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:goods":"80"}],["motorway",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:goods":"80"}]],
+        "IS": [["pedestrian zone",{"maxspeed":"10"}],["living street",{"maxspeed":"10"}],["parking lot",{"maxspeed":"15"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"80"}],["rural",{"maxspeed":"80"}],["rural road with asphalt or concrete surface",{"maxspeed":"90"}]],
+        "IT": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus:conditional":"80 @ (weightrating>8); 70 @ (articulated)","maxspeed:conditional":"80 @ (weightrating>3.5); 70 @ (weightrating>12)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>12); 70 @ (trailer); 70 @ (articulated)"}],["Italy: Strada extraurbana local",{"maxspeed":"90","maxspeed:bus:conditional":"80 @ (weightrating>8); 70 @ (articulated)","maxspeed:conditional":"80 @ (weightrating>3.5); 70 @ (weightrating>12)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>12); 70 @ (trailer); 70 @ (articulated)"}],["Italy: Strada extraurbana secondaria",{"maxspeed":"90","maxspeed:bus:conditional":"80 @ (weightrating>8); 70 @ (articulated)","maxspeed:conditional":"80 @ (weightrating>3.5); 70 @ (weightrating>12)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>12); 70 @ (trailer); 70 @ (articulated)"}],["Italy: Strada extraurbana principale",{"maxspeed":"110","maxspeed:bus:conditional":"80 @ (weightrating>8); 70 @ (articulated)","maxspeed:conditional":"90 @ (wet); 80 @ (weightrating>3.5); 70 @ (weightrating>12)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>12); 70 @ (trailer); 70 @ (articulated)"}],["Italy: Autostrada",{"maxspeed":"130","maxspeed:bus:conditional":"100 @ (weightrating>8); 80 @ (articulated)","maxspeed:conditional":"110 @ (wet); 100 @ (weightrating>3.5); 100 @ (weightrating>12)","maxspeed:hgv":"100","maxspeed:hgv:conditional":"80 @ (weightrating>12); 80 @ (trailer); 80 @ (articulated)"}]],
+        "JE": [["",{"maxspeed":"40 mph","maxspeed:bus":"30 mph","maxspeed:conditional":"30 mph @ (trailer)","maxspeed:hgv":"30 mph"}]],
+        "JP": [["without centerline",{"maxspeed":"30","maxspeed:bus":"100","maxspeed:bus:conditional":"80 @ (weightrating>8)","maxspeed:hgv":"80"}],["",{"maxspeed":"60","maxspeed:bus":"100","maxspeed:bus:conditional":"80 @ (weightrating>8)","maxspeed:hgv":"80"}],["motorway",{"maxspeed":"100","maxspeed:bus":"100","maxspeed:bus:conditional":"80 @ (weightrating>8)","maxspeed:hgv":"80"}]],
+        "KE": [["urban",{"maxspeed":"50","maxspeed:bus":"80","maxspeed:bus:conditional":"65 @ (trailer)","maxspeed:conditional":"80 @ (articulated); 65 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"65 @ (trailer)"}],["",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:bus:conditional":"65 @ (trailer)","maxspeed:conditional":"80 @ (articulated); 65 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"65 @ (trailer)"}],["rural",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:bus:conditional":"65 @ (trailer)","maxspeed:conditional":"80 @ (articulated); 65 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"65 @ (trailer)"}],["rural dual carriageway",{"maxspeed":"110","maxspeed:bus":"80","maxspeed:bus:conditional":"65 @ (trailer)","maxspeed:conditional":"80 @ (articulated); 65 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"65 @ (trailer)"}]],
+        "KG": [["urban",{"maxspeed":"60"}],["",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:coach":"90","maxspeed:conditional":"70 @ (weightrating>3.5); 70 @ (trailer)"}],["rural",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:coach":"90","maxspeed:conditional":"70 @ (weightrating>3.5); 70 @ (trailer)"}],["motorway",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:coach":"90","maxspeed:conditional":"90 @ (weightrating>3.5); 70 @ (trailer)"}]],
+        "KH": [["urban",{"maxspeed":"60"}],["",{"maxspeed":"100","maxspeed:hgv":"80"}],["rural",{"maxspeed":"100","maxspeed:hgv":"80"}]],
+        "KI": [["school zone",{"maxspeed":"30"}],["urban",{"maxspeed":"40","maxspeed:conditional":"30 @ (emptyweight>5); 30 @ (trailer)"}],["",{"maxspeed":"60","maxspeed:conditional":"30 @ (emptyweight>5); 30 @ (trailer)"}],["rural",{"maxspeed":"60","maxspeed:conditional":"30 @ (emptyweight>5); 30 @ (trailer)"}]],
+        "KN": [["urban",{"maxspeed":"20 mph"}],["",{"maxspeed":"40 mph","maxspeed:bus":"30 mph","maxspeed:goods":"30 mph"}],["rural",{"maxspeed":"40 mph","maxspeed:bus":"30 mph","maxspeed:goods":"30 mph"}]],
+        "KR": [["school zone",{"maxspeed":"30"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"60"}],["rural",{"maxspeed":"60"}],["rural road with 2 or more lanes in each direction",{"maxspeed":"80"}],["motorroad",{"maxspeed":"80"}],["motorway",{"maxspeed":"80"}],["motorroad with 2 lanes in each direction",{"maxspeed":"100"}],["motorway with 2 lanes in each direction",{"maxspeed":"100"}]],
+        "KZ": [["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"60"}],["",{"maxspeed":"110","maxspeed:bus":"70","maxspeed:coach":"90","maxspeed:conditional":"70 @ (trailer)","maxspeed:goods":"90","maxspeed:hgv":"70"}],["rural",{"maxspeed":"110","maxspeed:bus":"70","maxspeed:coach":"90","maxspeed:conditional":"70 @ (trailer)","maxspeed:goods":"90","maxspeed:hgv":"70"}],["motorway",{"maxspeed":"140","maxspeed:bus":"90","maxspeed:coach":"110","maxspeed:conditional":"90 @ (trailer)","maxspeed:goods":"110","maxspeed:hgv":"90"}]],
+        "LI": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"80"}],["rural",{"maxspeed":"80"}]],
+        "LR": [["school zone",{"maxspeed":"15 mph"}],["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"45 mph"}],["rural",{"maxspeed":"45 mph"}],["rural residential district",{"maxspeed":"35 mph"}]],
+        "LS": [["urban",{"maxspeed":"60","maxspeed:bus":"100","maxspeed:hgv:conditional":"80 @ (weightrating>9)"}],["",{"maxspeed":"100","maxspeed:bus":"100","maxspeed:conditional":"80 @ (articulated AND weightrating>9)","maxspeed:hgv:conditional":"80 @ (weightrating>9)"}],["rural",{"maxspeed":"100","maxspeed:bus":"100","maxspeed:conditional":"80 @ (articulated AND weightrating>9)","maxspeed:hgv:conditional":"80 @ (weightrating>9)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:conditional":"80 @ (articulated AND weightrating>9)","maxspeed:hgv:conditional":"80 @ (weightrating>9)"}]],
+        "LT": [["living street",{"maxspeed":"20"}],["parking lot",{"maxspeed":"20"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:conditional":"80 @ (weightrating>3.5)","maxspeed:hgv":"80"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:conditional":"80 @ (weightrating>3.5)","maxspeed:hgv":"80"}],["rural road without asphalt or concrete surface",{"maxspeed":"70"}],["motorroad",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:conditional":"110 @ (Nov-Mar); 90 @ (trailer); 90 @ (weightrating>3.5)","maxspeed:hgv":"90"}],["motorway",{"maxspeed":"130","maxspeed:bus":"100","maxspeed:bus:conditional":"90 @ (trailer)","maxspeed:conditional":"110 @ (Nov-Mar); 90 @ (weightrating>3.5); 90 @ (trailer)","maxspeed:hgv":"90"}]],
+        "LU": [["pedestrian zone",{"maxspeed":"20"}],["living street",{"maxspeed":"20"}],["cycle street",{"maxspeed":"30"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"75","maxspeed:conditional":"75 @ (weightrating>7.5); 75 @ (trailer); 75 @ (articulated)"}],["rural",{"maxspeed":"90","maxspeed:bus":"75","maxspeed:conditional":"75 @ (weightrating>7.5); 75 @ (trailer); 75 @ (articulated)"}],["motorway",{"maxspeed":"130","maxspeed:bus":"90","maxspeed:bus:conditional":"75 @ (weightrating>12)","maxspeed:conditional":"110 @ (wet); 90 @ (weightrating>7.5); 90 @ (trailer); 90 @ (articulated); 75 @ (weightrating>12)"}]],
+        "LV": [["living street",{"maxspeed":"20"}],["parking lot",{"maxspeed":"20"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv:conditional":"80 @ (weightrating>7.5)"}],["rural",{"maxspeed":"90","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv:conditional":"80 @ (weightrating>7.5)"}],["rural road without asphalt or concrete surface",{"maxspeed":"80"}],["motorroad",{"maxspeed":"110","maxspeed:bus":"100","maxspeed:bus:conditional":"90 @ (Dec-Feb)","maxspeed:conditional":"90 @ (Dec-Feb); 90 @ (trailer)","maxspeed:hgv":"110","maxspeed:hgv:conditional":"90 @ (Dec-Feb); 90 @ (weightrating>7.5)"}]],
+        "MA": [["urban",{"maxspeed":"60"}],["",{"maxspeed":"100","maxspeed:bus":"100","maxspeed:bus:conditional":"90 @ (weightrating>3.5)","maxspeed:coach":"90","maxspeed:goods":"100","maxspeed:goods:conditional":"90 @ (weightrating>3.5); 80 @ (weightrating>12); 70 @ (weightrating>19)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (weightrating>12); 70 @ (weightrating>19)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"120","maxspeed:bus:conditional":"100 @ (weightrating>3.5)","maxspeed:coach":"100","maxspeed:goods":"120","maxspeed:goods:conditional":"100 @ (weightrating>3.5); 90 @ (weightrating>12); 80 @ (weightrating>19)","maxspeed:hgv":"100","maxspeed:hgv:conditional":"90 @ (weightrating>12); 80 @ (weightrating>19)"}]],
+        "MC": [["",{"maxspeed":"50"}]],
+        "MD": [["pedestrian zone",{"maxspeed":"5"}],["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:coach":"90","maxspeed:conditional":"70 @ (trailer)","maxspeed:hgv":"70"}],["rural",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:coach":"90","maxspeed:conditional":"70 @ (trailer)","maxspeed:hgv":"70"}],["motorroad",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:coach":"90","maxspeed:conditional":"90 @ (trailer)","maxspeed:hgv":"90"}]],
+        "ME": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (weightrating>7.5)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>7.5)"}],["motorroad",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (weightrating>7.5)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>7.5)"}],["motorway",{"maxspeed":"130","maxspeed:bus":"100","maxspeed:goods:conditional":"90 @ (weightrating>3.5); 90 @ (trailer)","maxspeed:hgv:conditional":"90 @ (weightrating>3.5); 90 @ (trailer)"}]],
+        "MH": [["school zone",{"maxspeed":"15 mph"}],["urban",{"maxspeed":"25 mph"}],["",{}],["rural",{"maxspeed":"40 mph"}]],
+        "MK": [["urban school zone",{"maxspeed":"30"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer); 70 @ (weightrating>7.5)"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer); 70 @ (weightrating>7.5)"}],["rural school zone",{"maxspeed":"50","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer); 70 @ (weightrating>7.5)"}],["motorroad",{"maxspeed":"110","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer); 70 @ (weightrating>7.5)"}],["motorway",{"maxspeed":"130","maxspeed:bus":"100","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods":"100","maxspeed:goods:conditional":"90 @ (weightrating>3.5); 80 @ (weightrating>7.5)"}]],
+        "MM": [["urban",{"maxspeed":"30 mph","maxspeed:conditional":"20 mph @ (trailer)"}],["",{"maxspeed":"50 mph"}],["rural",{"maxspeed":"50 mph"}]],
+        "MN": [["living street",{"maxspeed":"20"}],["school zone",{"maxspeed":"20"}],["urban",{"maxspeed":"60"}],["",{"maxspeed":"80","maxspeed:conditional":"60 @ (trailer)"}],["rural",{"maxspeed":"80","maxspeed:conditional":"60 @ (trailer)"}],["Mongolia: тууш замд",{"maxspeed":"100","maxspeed:conditional":"80 @ (trailer)"}]],
+        "MO": [["",{"maxspeed":"60","maxspeed:conditional":"50 @ (trailer); 50 @ (weightrating>3.5); 50 @ (seats>=10)"}]],
+        "MS": [["urban",{"maxspeed":"20 mph","maxspeed:bus":"15 mph","maxspeed:goods":"15 mph"}],["",{"maxspeed":"40 mph","maxspeed:bus":"25 mph","maxspeed:goods":"25 mph"}],["rural",{"maxspeed":"40 mph","maxspeed:bus":"25 mph","maxspeed:goods":"25 mph"}]],
+        "MT": [["urban",{"maxspeed":"50","maxspeed:bus":"40","maxspeed:goods":"40","maxspeed:goods:conditional":"30 @ (weightrating>3)"}],["",{"maxspeed":"80","maxspeed:bus":"60","maxspeed:goods":"60","maxspeed:goods:conditional":"40 @ (weightrating>3)"}],["rural",{"maxspeed":"80","maxspeed:bus":"60","maxspeed:goods":"60","maxspeed:goods:conditional":"40 @ (weightrating>3)"}]],
+        "MU": [["Mauritius: C road",{"maxspeed":"40"}],["",{"maxspeed":"60"}],["Mauritius: B road",{"maxspeed":"60"}],["Mauritius: A road",{"maxspeed":"80","maxspeed:conditional":"60 @ (weightrating>3.5); 60 @ (trailer)","maxspeed:goods":"60"}],["Mauritius: M road",{"maxspeed":"110","maxspeed:bus":"80","maxspeed:conditional":"70 @ (weightrating>3.5); 60 @ (trailer)","maxspeed:goods":"80"}]],
+        "MW": [["urban",{"maxspeed":"50","maxspeed:bus":"90","maxspeed:bus:conditional":"80 @ (seats>=28); 80 @ (articulated)","maxspeed:goods:conditional":"80 @ (weightrating>9)"}],["",{"maxspeed":"80","maxspeed:bus":"90","maxspeed:bus:conditional":"80 @ (seats>=28); 80 @ (articulated)","maxspeed:goods:conditional":"80 @ (weightrating>9)"}],["rural",{"maxspeed":"80","maxspeed:bus":"90","maxspeed:bus:conditional":"80 @ (seats>=28); 80 @ (articulated)","maxspeed:goods:conditional":"80 @ (weightrating>9)"}],["Malawi: rural highway",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:bus:conditional":"80 @ (seats>=28); 80 @ (articulated)","maxspeed:conditional":"90 @ (trailer)","maxspeed:goods:conditional":"80 @ (weightrating>9)"}]],
+        "MX": [["Mexico: zona de hospital, asilo, albergue o casa hogar",{"maxspeed":"20"}],["Mexico: zona o entorno escolar en una vía secundaria o calle terciaria",{"maxspeed":"20"}],["Mexico: zona o entorno escolar",{"maxspeed":"30"}],["Mexico: calle secundaria o calle terciaria",{"maxspeed":"30"}],["Mexico: avenida primaria sin acceso controlado",{"maxspeed":"50"}],["Mexico: carril central de una avenida de acceso controlado",{"maxspeed":"80"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"80"}],["rural",{"maxspeed":"80"}],["Mexico: carretera o autopista de jurisdicción federal",{"maxspeed":"110","maxspeed:bus":"110","maxspeed:bus:conditional":"95 @ (seats>=30); 95 @ (wheels>=6)","maxspeed:goods":"80"}]],
+        "MZ": [["urban",{"maxspeed":"60"}],["",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:conditional":"100 @ (trailer)","maxspeed:goods":"100"}],["rural",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:conditional":"100 @ (trailer)","maxspeed:goods":"100"}]],
+        "NA": [["urban",{"maxspeed":"60","maxspeed:bus":"100","maxspeed:goods:conditional":"80 @ (weightrating>9)"}],["",{"maxspeed":"100","maxspeed:bus":"100","maxspeed:goods:conditional":"80 @ (weightrating>9)"}],["rural",{"maxspeed":"100","maxspeed:bus":"100","maxspeed:goods:conditional":"80 @ (weightrating>9)"}],["rural road with asphalt or concrete surface",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:goods:conditional":"80 @ (weightrating>9)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:goods:conditional":"80 @ (weightrating>9)"}]],
+        "NE": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:goods:conditional":"90 @ (weightrating>9)"}],["rural road with asphalt or concrete surface",{"maxspeed":"90","maxspeed:goods:conditional":"90 @ (weightrating>9)"}],["Niger: national road",{"maxspeed":"90","maxspeed:goods:conditional":"90 @ (weightrating>9)"}],["Niger: autoroute",{"maxspeed":"110","maxspeed:goods:conditional":"90 @ (weightrating>9)"}]],
+        "NG": [["urban",{"maxspeed":"50","maxspeed:hgv":"45"}],["",{"maxspeed":"80","maxspeed:hgv":"50"}],["rural",{"maxspeed":"80","maxspeed:hgv":"50"}],["motorway",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:hgv":"60"}]],
+        "NI": [["urban",{"maxspeed":"45"}],["",{"maxspeed":"60"}],["rural",{"maxspeed":"60"}],["Nicaragua: Carretera",{"maxspeed":"100"}]],
+        "NL": [["living street",{"maxspeed":"15"}],["urban",{"maxspeed":"50","maxspeed:bus":"80","maxspeed:coach":"100","maxspeed:hgv":"80"}],["",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:coach":"100","maxspeed:hgv":"80"}],["rural",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:coach":"100","maxspeed:hgv":"80"}],["rural motorroad",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:coach":"100","maxspeed:conditional":"90 @ (trailer); 80 @ (weightrating>3.5 AND trailer)","maxspeed:hgv":"80"}],["rural motorway",{"maxspeed":"130","maxspeed:bus":"80","maxspeed:coach":"100","maxspeed:conditional":"90 @ (trailer); 80 @ (weightrating>3.5 AND trailer)","maxspeed:hgv":"80"}]],
+        "NL-BQ1": [["urban",{"maxspeed":"40"}],["",{"maxspeed":"60"}],["rural",{"maxspeed":"60"}]],
+        "NL-BQ2": [["urban",{"maxspeed":"20"}],["",{"maxspeed":"40"}],["rural",{"maxspeed":"40"}]],
+        "NL-BQ3": [["urban",{"maxspeed":"30"}],["",{"maxspeed":"50"}],["rural",{"maxspeed":"50"}]],
+        "NO": [["living street",{"maxspeed":"walk"}],["pedestrian zone",{"maxspeed":"walk"}],["urban",{"maxspeed":"50","maxspeed:bus:conditional":"80 @ (weightrating>3.5)","maxspeed:conditional":"80 @ (weightrating>7.5); 80 @ (trailer)","maxspeed:goods:conditional":"80 @ (weightrating>3.5)","maxspeed:hgv":"80"}],["",{"maxspeed":"80","maxspeed:bus:conditional":"80 @ (weightrating>3.5)","maxspeed:conditional":"80 @ (weightrating>7.5); 80 @ (trailer)","maxspeed:goods:conditional":"80 @ (weightrating>3.5)","maxspeed:hgv":"80"}],["rural",{"maxspeed":"80","maxspeed:bus:conditional":"80 @ (weightrating>3.5)","maxspeed:conditional":"80 @ (weightrating>7.5); 80 @ (trailer)","maxspeed:goods:conditional":"80 @ (weightrating>3.5)","maxspeed:hgv":"80"}],["motorway",{"maxspeed":"110","maxspeed:bus:conditional":"80 @ (weightrating>3.5)","maxspeed:coach":"100","maxspeed:conditional":"80 @ (weightrating>7.5); 80 @ (trailer)","maxspeed:goods:conditional":"80 @ (weightrating>3.5)","maxspeed:hgv":"80"}]],
+        "NP": [["urban",{"maxspeed":"40"}],["hilly road",{"maxspeed":"80","maxspeed:bus":"50","maxspeed:goods":"50"}],["",{"maxspeed":"80","maxspeed:bus":"70","maxspeed:goods":"70"}],["rural",{"maxspeed":"80","maxspeed:bus":"70","maxspeed:goods":"70"}]],
+        "NR": [["school zone",{"maxspeed":"20"}],["",{"maxspeed":"50"}]],
+        "NZ": [["living street",{"maxspeed":"10"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"100","maxspeed:conditional":"90 @ (weightrating>3.5); 90 @ (trailer)"}],["rural",{"maxspeed":"100","maxspeed:conditional":"90 @ (weightrating>3.5); 90 @ (trailer)"}]],
+        "PA": [["school zone",{"maxspeed":"30"}],["urban",{"maxspeed":"40"}],["Panama: Avenida",{"maxspeed":"60"}],["Panama: Avenida de dos carriles",{"maxspeed":"80"}],["Panama: Carretera multicarril en zona urbana",{"maxspeed":"80"}],["",{"maxspeed":"100"}],["rural",{"maxspeed":"100"}],["motorway",{"maxspeed":"120"}]],
+        "PE": [["school zone",{"maxspeed":"30"}],["urban",{"maxspeed":"40"}],["",{"maxspeed":"60"}],["rural",{"maxspeed":"60"}],["Perú: Avenida",{"maxspeed":"60"}],["Perú: Vía Expresa",{"maxspeed":"80"}],["Perú: Carretera",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:conditional":"80 @ (caravan)","maxspeed:hgv":"80"}]],
+        "PG": [["school zone",{"maxspeed":"25"}],["playground zone",{"maxspeed":"25"}],["village",{"maxspeed":"40"}],["urban",{"maxspeed":"60"}],["",{"maxspeed":"100"}],["rural",{"maxspeed":"100"}]],
+        "PH": [["school zone",{"maxspeed":"20"}],["Philippines: Barangay road",{"maxspeed":"20"}],["urban",{"maxspeed":"30"}],["",{"maxspeed":"40","maxspeed:bus":"30","maxspeed:hgv":"30"}],["Philippines: Provincial road",{"maxspeed":"40","maxspeed:bus":"30","maxspeed:hgv":"30"}],["Philippines: Through street",{"maxspeed":"40","maxspeed:bus":"30","maxspeed:hgv":"30"}],["Philippines: National road",{"maxspeed":"80","maxspeed:bus":"50","maxspeed:hgv":"50"}],["motorway",{"maxspeed":"100"}]],
+        "PK": [["urban unpaved road",{"maxspeed":"40","maxspeed:bus":"70","maxspeed:bus:conditional":"65 @ (seats>=15)","maxspeed:goods":"80","maxspeed:goods:conditional":"50 @ (weightrating>2.268); 25 @ (trailer); 25 @ (weightrating>10.2)"}],["urban motorway",{"maxspeed":"110","maxspeed:bus":"70","maxspeed:bus:conditional":"65 @ (seats>=15)","maxspeed:conditional":"50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"50 @ (weightrating>2.268); 25 @ (trailer); 25 @ (weightrating>10.2)"}],["urban road with 4 or more lanes in each direction",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:bus:conditional":"65 @ (seats>=15)","maxspeed:conditional":"50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"50 @ (weightrating>2.268); 25 @ (trailer); 25 @ (weightrating>10.2)"}],["urban road with 3 lanes in each direction",{"maxspeed":"80","maxspeed:bus":"70","maxspeed:bus:conditional":"65 @ (seats>=15)","maxspeed:conditional":"50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"50 @ (weightrating>2.268); 25 @ (trailer); 25 @ (weightrating>10.2)"}],["urban road with 2 lanes in each direction",{"maxspeed":"70","maxspeed:bus":"70","maxspeed:bus:conditional":"65 @ (seats>=15)","maxspeed:conditional":"50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"50 @ (weightrating>2.268); 25 @ (trailer); 25 @ (weightrating>10.2)"}],["urban",{"maxspeed":"55","maxspeed:bus":"70","maxspeed:bus:conditional":"65 @ (seats>=15)","maxspeed:conditional":"50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"50 @ (weightrating>2.268); 25 @ (trailer); 25 @ (weightrating>10.2)"}],["",{"maxspeed":"70","maxspeed:bus":"70","maxspeed:bus:conditional":"65 @ (seats>=15)","maxspeed:conditional":"50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"50 @ (weightrating>2.268); 25 @ (trailer); 25 @ (weightrating>10.2)"}],["rural",{"maxspeed":"70","maxspeed:bus":"70","maxspeed:bus:conditional":"65 @ (seats>=15)","maxspeed:conditional":"50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"50 @ (weightrating>2.268); 25 @ (trailer); 25 @ (weightrating>10.2)"}],["rural unpaved road",{"maxspeed":"50","maxspeed:bus":"70","maxspeed:bus:conditional":"65 @ (seats>=15)","maxspeed:goods":"80","maxspeed:goods:conditional":"50 @ (weightrating>2.268); 25 @ (trailer); 25 @ (weightrating>10.2)"}],["rural road with 2 lanes in each direction",{"maxspeed":"80","maxspeed:bus":"70","maxspeed:bus:conditional":"65 @ (seats>=15)","maxspeed:conditional":"50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"50 @ (weightrating>2.268); 25 @ (trailer); 25 @ (weightrating>10.2)"}],["rural road with 3 lanes in each direction",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:bus:conditional":"65 @ (seats>=15)","maxspeed:conditional":"50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"50 @ (weightrating>2.268); 25 @ (trailer); 25 @ (weightrating>10.2)"}],["rural road with 4 or more lanes in each direction",{"maxspeed":"110","maxspeed:bus":"70","maxspeed:bus:conditional":"65 @ (seats>=15)","maxspeed:conditional":"50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"50 @ (weightrating>2.268); 25 @ (trailer); 25 @ (weightrating>10.2)"}],["rural motorway",{"maxspeed":"130","maxspeed:bus":"70","maxspeed:bus:conditional":"65 @ (seats>=15)","maxspeed:goods":"80","maxspeed:goods:conditional":"50 @ (weightrating>2.268); 25 @ (trailer); 25 @ (weightrating>10.2)"}]],
+        "PL": [["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:conditional":"70 @ (weightrating>3.5); 70 @ (trailer)"}],["rural",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:conditional":"70 @ (weightrating>3.5); 70 @ (trailer)"}],["rural dual carriageway with 2 or more lanes in each direction",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (trailer)"}],["motorroad with single carriageway",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:coach":"100","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (trailer)"}],["motorroad with dual carriageway",{"maxspeed":"120","maxspeed:bus":"80","maxspeed:coach":"100","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (trailer)"}],["motorway",{"maxspeed":"140","maxspeed:bus":"80","maxspeed:coach":"100","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (trailer)"}]],
+        "PN": [["",{"maxspeed":"30 mph"}]],
+        "PR": [["urban school zone",{"maxspeed:bus":"15 mph","maxspeed:conditional":"15 mph @ (06:00-19:00)"}],["urban",{"maxspeed":"25 mph","maxspeed:bus":"15 mph","maxspeed:conditional":"15 mph @ (weightrating>10000 lb)"}],["",{"maxspeed":"45 mph","maxspeed:bus":"35 mph","maxspeed:conditional":"35 mph @ (weightrating>10000 lb)"}],["rural",{"maxspeed":"45 mph","maxspeed:bus":"35 mph","maxspeed:conditional":"35 mph @ (weightrating>10000 lb)"}],["rural school zone",{"maxspeed:bus":"15 mph","maxspeed:conditional":"25 mph @ (06:00-19:00); 15 mph @ (weightrating>10000 lb)"}],["motorway",{"maxspeed":"65 mph","maxspeed:bus":"55 mph","maxspeed:conditional":"55 mph @ (weightrating>10000 lb)"}]],
+        "PS": [["Palestine: شارعمختل",{"maxspeed":"25"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"80"}],["rural",{"maxspeed":"80"}],["motorway",{"maxspeed":"110","maxspeed:bus:conditional":"100 @ (seats>=12)","maxspeed:goods:conditional":"90 @ (weightrating>12)"}]],
+        "PT": [["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"50","maxspeed:hgv:conditional":"40 @ (trailer)"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"70 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"70 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["motorroad",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:bus:conditional":"90 @ (trailer)","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods":"90","maxspeed:goods:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:bus:conditional":"90 @ (trailer)","maxspeed:conditional":"100 @ (trailer)","maxspeed:goods":"110","maxspeed:goods:conditional":"90 @ (trailer)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (trailer)"}]],
+        "PY": [["school zone",{"maxspeed":"20"}],["urban",{"maxspeed":"50","maxspeed:bus":"40","maxspeed:hgv":"40"}],["",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:hgv":"90"}],["rural",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:hgv":"90"}]],
+        "RO": [["living street",{"maxspeed":"20"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer); 70 @ (articulated); 70 @ (weightrating>7.5); 60 @ (weightrating>7.5 AND trailer); 60 @ (weightrating>7.5 AND articulated)"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer); 70 @ (articulated); 70 @ (weightrating>7.5); 60 @ (weightrating>7.5 AND trailer); 60 @ (weightrating>7.5 AND articulated)"}],["Romania: drum național european (E)",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:bus:conditional":"80 @ (trailer)","maxspeed:conditional":"90 @ (trailer)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (trailer)"}],["Romania: drum expres",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:bus:conditional":"90 @ (trailer)","maxspeed:conditional":"110 @ (trailer)","maxspeed:hgv":"100","maxspeed:hgv:conditional":"90 @ (trailer)"}],["motorway",{"maxspeed":"130","maxspeed:bus":"110","maxspeed:bus:conditional":"100 @ (trailer)","maxspeed:conditional":"120 @ (trailer)","maxspeed:hgv":"110","maxspeed:hgv:conditional":"100 @ (trailer); 100 @ (articulated); 90 @ (weightrating>7.5); 80 @ (weightrating>7.5 AND trailer); 80 @ (weightrating>7.5 AND articulated)"}]],
+        "RS": [["pedestrian zone",{"maxspeed":"walk"}],["living street",{"maxspeed":"10"}],["urban",{"maxspeed":"50","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (caravan)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>7.5); 70 @ (trailer)"}],["",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (caravan)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>7.5); 70 @ (trailer)"}],["rural",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (caravan)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>7.5); 70 @ (trailer)"}],["motorroad",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (articulated)","maxspeed:conditional":"80 @ (caravan)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (weightrating>7.5); 70 @ (trailer)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:bus:conditional":"90 @ (articulated)","maxspeed:conditional":"80 @ (caravan)","maxspeed:hgv":"100","maxspeed:hgv:conditional":"90 @ (weightrating>7.5); 90 @ (trailer)"}]],
+        "RU": [["living street",{"maxspeed":"20"}],["cycle street",{"maxspeed":"20"}],["urban",{"maxspeed":"60"}],["",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:coach":"90","maxspeed:conditional":"70 @ (trailer)","maxspeed:hgv":"70"}],["rural",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:coach":"90","maxspeed:conditional":"70 @ (trailer)","maxspeed:hgv":"70"}],["motorway",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:coach":"90","maxspeed:conditional":"90 @ (trailer)","maxspeed:hgv":"90"}]],
+        "RW": [["urban",{"maxspeed":"40"}],["",{"maxspeed":"80","maxspeed:goods":"60"}],["rural",{"maxspeed":"80","maxspeed:goods":"60"}]],
+        "SA": [["urban",{"maxspeed":"50","maxspeed:hgv":"30"}],["",{"maxspeed":"120","maxspeed:hgv":"70"}],["rural",{"maxspeed":"120","maxspeed:hgv":"70"}]],
+        "SD": [["urban",{"maxspeed":"50"}]],
+        "SE": [["pedestrian zone",{"maxspeed":"walk"}],["living street",{"maxspeed":"walk"}],["cycle street",{"maxspeed":"30"}],["urban",{"maxspeed":"50","maxspeed:bus:conditional":"60 @ (articulated)","maxspeed:coach":"100","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (articulated)"}],["",{"maxspeed":"70","maxspeed:bus:conditional":"60 @ (articulated)","maxspeed:coach":"100","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (articulated)"}],["rural",{"maxspeed":"70","maxspeed:bus:conditional":"60 @ (articulated)","maxspeed:coach":"100","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (articulated)"}],["motorway",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"60 @ (articulated)","maxspeed:coach":"100","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (articulated)"}]],
+        "SG": [["school zone",{"maxspeed":"40"}],["Singapore: silver zone",{"maxspeed":"40"}],["",{"maxspeed":"50"}]],
+        "SH": [["",{"maxspeed":"30 mph"}]],
+        "SI": [["living street",{"maxspeed":"10"}],["pedestrian zone",{"maxspeed":"10"}],["urban",{"maxspeed":"50","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (weightrating>3.5 AND trailer); 70 @ (articulated)","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (caravan); 70 @ (weightrating>3.5 AND trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (weightrating>3.5 AND trailer); 70 @ (articulated)","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (caravan); 70 @ (weightrating>3.5 AND trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (weightrating>3.5 AND trailer); 70 @ (articulated)","maxspeed:conditional":"80 @ (weightrating>3.5); 80 @ (caravan); 70 @ (weightrating>3.5 AND trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["trunk",{"maxspeed":"110","maxspeed:bus":"80","maxspeed:bus:conditional":"80 @ (articulated); 80 @ (trailer)","maxspeed:coach":"100","maxspeed:conditional":"100 @ (trailer); 80 @ (weightrating>3.5); 70 @ (weightrating>3.5 AND trailer)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"90 @ (weightrating>3.5); 80 @ (trailer); 80 @ (weightrating>3.5 AND trailer)"}],["motorway",{"maxspeed":"130","maxspeed:bus":"80","maxspeed:bus:conditional":"80 @ (articulated); 80 @ (trailer)","maxspeed:coach":"100","maxspeed:conditional":"100 @ (trailer); 80 @ (weightrating>3.5); 70 @ (weightrating>3.5 AND trailer)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"90 @ (weightrating>3.5); 80 @ (trailer); 80 @ (weightrating>3.5 AND trailer)"}]],
+        "SK": [["school zone",{"maxspeed":"20"}],["pedestrian zone",{"maxspeed":"20"}],["living street",{"maxspeed":"20"}],["cycle street",{"maxspeed":"30"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90"}],["rural",{"maxspeed":"90"}],["motorroad",{"maxspeed":"130","maxspeed:bus:conditional":"10090 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (trailerweight>0.75)","maxspeed:hgv":"90"}],["motorway",{"maxspeed":"130","maxspeed:bus:conditional":"10090 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (trailerweight>0.75)","maxspeed:hgv":"90"}]],
+        "SN": [["",{"maxspeed":"90","maxspeed:bus":"90","maxspeed:bus:conditional":"70 @ (seats>=15)","maxspeed:conditional":"85 @ (trailerweight>0.75)","maxspeed:hgv":"85","maxspeed:hgv:conditional":"75 @ (weightrating>10); 65 @ (weightrating>16); 50 @ (weightrating>22)"}],["Senegal: National road",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"70 @ (seats>=15)","maxspeed:conditional":"85 @ (trailerweight>0.75)","maxspeed:hgv":"85","maxspeed:hgv:conditional":"75 @ (weightrating>10); 65 @ (weightrating>16); 50 @ (weightrating>22)"}],["motorway",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"70 @ (seats>=15)","maxspeed:conditional":"85 @ (trailerweight>0.75)","maxspeed:hgv":"85","maxspeed:hgv:conditional":"75 @ (weightrating>10); 65 @ (weightrating>16); 50 @ (weightrating>22)"}]],
+        "SS": [["urban",{"maxspeed":"45"}]],
+        "SV": [["roundabout",{"maxspeed":"30"}],["urban",{"maxspeed":"50","maxspeed:bus":"40","maxspeed:hgv":"40"}],["",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:hgv":"70"}],["rural",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:hgv":"70"}]],
+        "TD": [["urban",{"maxspeed":"60","maxspeed:conditional":"40 @ (weightrating>3.5)"}],["",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (weightrating>3.5); 60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)"}],["rural",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)","maxspeed:conditional":"90 @ (weightrating>3.5); 60 @ (weightrating>12.5); 60 @ (trailerweight>0.75)"}]],
+        "TH": [["urban",{"maxspeed":"80","maxspeed:bus":"60","maxspeed:conditional":"45 @ (trailer)","maxspeed:goods:conditional":"60 @ (weight>2.2)"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:conditional":"55 @ (trailer)","maxspeed:goods:conditional":"80 @ (weight>2.2)"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:conditional":"55 @ (trailer)","maxspeed:goods:conditional":"80 @ (weight>2.2)"}],["Thailand: ทํางขนําน",{"maxspeed":"80","maxspeed:bus":"60","maxspeed:conditional":"45 @ (trailer)","maxspeed:goods:conditional":"60 @ (weight>2.2)"}],["rural dual carriageway with 2 or more lanes in each direction",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:conditional":"65 @ (trailer)","maxspeed:goods:conditional":"90 @ (weight>2.2)"}],["Thailand: ทํางพิเศษ on bridge or in tunnel",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:conditional":"65 @ (trailer)","maxspeed:goods:conditional":"80 @ (weight>2.2)"}],["Thailand: ทํางพิเศษ not on bridge or in tunnel",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:conditional":"65 @ (trailer)","maxspeed:goods:conditional":"90 @ (weight>2.2)"}],["Thailand: motorway that is not a ทํางพิเศษ",{"maxspeed":"120","maxspeed:bus":"90","maxspeed:conditional":"65 @ (trailer)","maxspeed:goods:conditional":"90 @ (weight>2.2)"}]],
+        "TL": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"70 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"70 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["motorroad",{"maxspeed":"100","maxspeed:bus":"90","maxspeed:bus:conditional":"90 @ (trailer)","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods":"90","maxspeed:goods:conditional":"80 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:bus:conditional":"90 @ (trailer)","maxspeed:conditional":"100 @ (trailer)","maxspeed:goods":"110","maxspeed:goods:conditional":"90 @ (trailer)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"80 @ (trailer)"}]],
+        "TN": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus":"90","maxspeed:bus:conditional":"80 @ (weightrating>10); 70 @ (weightrating>12); 60 @ (weightrating>19)","maxspeed:conditional":"80 @ (weightrating>3.5); 70 @ (weightrating>12); 60 @ (weightrating>19)"}],["rural",{"maxspeed":"90","maxspeed:bus":"90","maxspeed:bus:conditional":"80 @ (weightrating>10); 70 @ (weightrating>12); 60 @ (weightrating>19)","maxspeed:conditional":"80 @ (weightrating>3.5); 70 @ (weightrating>12); 60 @ (weightrating>19)"}],["motorway",{"maxspeed":"110","maxspeed:bus":"110","maxspeed:bus:conditional":"100 @ (weightrating>10); 90 @ (weightrating>12); 80 @ (weightrating>19)","maxspeed:conditional":"100 @ (weightrating>3.5); 90 @ (weightrating>12); 80 @ (weightrating>19)"}]],
+        "TR": [["urban",{"maxspeed":"50","maxspeed:conditional":"40 @ (trailer)"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:bus:conditional":"70 @ (trailer)","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["rural dual carriageway",{"maxspeed":"110","maxspeed:bus":"90","maxspeed:bus:conditional":"80 @ (trailer)","maxspeed:conditional":"100 @ (trailer)","maxspeed:goods":"100","maxspeed:goods:conditional":"90 @ (trailer)","maxspeed:hgv":"85","maxspeed:hgv:conditional":"75 @ (trailer)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:bus:conditional":"90 @ (trailer)","maxspeed:conditional":"110 @ (trailer)","maxspeed:goods":"110","maxspeed:goods:conditional":"100 @ (trailer)","maxspeed:hgv":"90","maxspeed:hgv:conditional":"0 @ (trailer)"}]],
+        "TT": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"80","maxspeed:bus":"65","maxspeed:conditional":"65 @ (trailer)","maxspeed:goods":"65"}],["rural",{"maxspeed":"80","maxspeed:bus":"65","maxspeed:conditional":"65 @ (trailer)","maxspeed:goods":"65"}]],
+        "TV": [["",{"maxspeed":"40"}]],
+        "TW": [["without centerline",{"maxspeed":"30"}],["",{"maxspeed":"50"}]],
+        "TZ": [["urban",{"maxspeed":"50"}],["",{"maxspeed":"110","maxspeed:conditional":"80 @ (weightrating>3.5)"}],["rural",{"maxspeed":"110","maxspeed:conditional":"80 @ (weightrating>3.5)"}]],
+        "UA": [["living street",{"maxspeed":"20"}],["pedestrian zone",{"maxspeed":"20"}],["urban",{"maxspeed":"50"}],["",{"maxspeed":"90","maxspeed:bus:conditional":"90 @ (seats>=18)","maxspeed:conditional":"80 @ (trailer)"}],["rural",{"maxspeed":"90","maxspeed:bus:conditional":"90 @ (seats>=18)","maxspeed:conditional":"80 @ (trailer)"}],["dual carriageway",{"maxspeed":"110","maxspeed:bus:conditional":"90 @ (seats>=18)","maxspeed:conditional":"80 @ (trailer)"}],["motorway",{"maxspeed":"130","maxspeed:bus:conditional":"90 @ (seats>=18)","maxspeed:conditional":"80 @ (trailer)"}]],
+        "UG": [["urban",{"maxspeed":"50","maxspeed:bus":"60","maxspeed:conditional":"60 @ (trailer)","maxspeed:goods":"60"}],["",{"maxspeed":"80","maxspeed:bus":"60","maxspeed:conditional":"60 @ (trailer)","maxspeed:goods":"60"}],["rural",{"maxspeed":"80","maxspeed:bus":"60","maxspeed:conditional":"60 @ (trailer)","maxspeed:goods":"60"}],["rural road with asphalt or concrete surface",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods":"80"}]],
+        "US": [["",{}]],
+        "US-AK": [["alley",{"maxspeed":"15 mph"}],["business district",{"maxspeed":"20 mph"}],["residential district",{"maxspeed":"25 mph"}],["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"55 mph","maxspeed:conditional":"45 mph @ (caravan)"}],["rural",{"maxspeed":"55 mph","maxspeed:conditional":"45 mph @ (caravan)"}]],
+        "US-AL": [["urban",{"maxspeed":"30 mph"}],["",{"maxspeed":"45 mph"}],["rural",{"maxspeed":"45 mph"}],["rural road without asphalt or concrete surface",{"maxspeed":"35 mph"}],["Alabama: rural highway",{"maxspeed":"55 mph"}],["Alabama: rural highway with 2 or more lanes in each direction",{"maxspeed":"65 mph"}],["US interstate highway",{"maxspeed":"70 mph"}]],
+        "US-AR": [["urban",{"maxspeed":"30 mph","maxspeed:hgv:conditional":"50 mph @ (weightcapacity>1.5 st); 30 mph @ (weightrating>64000 lb)"}],["",{"maxspeed":"65 mph","maxspeed:conditional":"55 mph @ (caravan)","maxspeed:hgv:conditional":"50 mph @ (weightcapacity>1.5 st); 30 mph @ (weightrating>64000 lb)"}],["rural",{"maxspeed":"65 mph","maxspeed:conditional":"55 mph @ (caravan)","maxspeed:hgv:conditional":"50 mph @ (weightcapacity>1.5 st); 30 mph @ (weightrating>64000 lb)"}]],
+        "US-AZ": [["school zone",{"maxspeed":"15 mph"}],["residential district",{"maxspeed":"25 mph"}],["business district",{"maxspeed":"25 mph"}],["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"65 mph"}],["rural",{"maxspeed":"65 mph"}]],
+        "US-CA": [["California: alley",{"maxspeed":"15 mph"}],["school zone",{"maxspeed":"25 mph"}],["residential district",{"maxspeed":"25 mph"}],["business district",{"maxspeed":"25 mph"}],["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"55 mph","maxspeed:conditional":"55 mph @ (trailer)"}],["rural",{"maxspeed":"55 mph","maxspeed:conditional":"55 mph @ (trailer)"}],["rural road with 1 lane in each direction",{"maxspeed":"65 mph","maxspeed:bus:conditional":"55 mph @ (articulated); 55 mph @ (agricultural)","maxspeed:conditional":"55 mph @ (trailer)","maxspeed:hgv:conditional":"55 mph @ (articulated)"}]],
+        "US-CO": [["business district",{"maxspeed":"25 mph"}],["residential district",{"maxspeed":"30 mph"}],["urban",{"maxspeed":"30 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}],["rural winding mountain road",{"maxspeed":"25 mph"}],["rural open mountain road",{"maxspeed":"40 mph"}],["US interstate highway",{"maxspeed":"65 mph"}],["motorway",{"maxspeed":"65 mph"}],["expressway",{"maxspeed":"65 mph"}]],
+        "US-CT": [["",{"maxspeed":"55 mph"}],["motorway",{"maxspeed":"65 mph"}]],
+        "US-DC": [["playground zone",{"maxspeed":"15 mph"}],["school zone",{"maxspeed":"15 mph"}],["District of Columbia: alley",{"maxspeed":"15 mph"}],["",{"maxspeed":"20 mph"}]],
+        "US-DE": [["school zone",{"maxspeed":"20 mph"}],["residential district",{"maxspeed":"25 mph"}],["business district",{"maxspeed":"25 mph"}],["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"50 mph"}],["rural",{"maxspeed":"50 mph"}],["rural single carriageway with 2 or more lanes in each direction",{"maxspeed":"55 mph"}],["rural dual carriageway",{"maxspeed":"55 mph"}]],
+        "US-FL": [["residential district",{"maxspeed":"30 mph"}],["business district",{"maxspeed":"30 mph"}],["urban",{"maxspeed":"30 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}],["rural dual carriageway with 2 or more lanes in each direction",{"maxspeed":"65 mph"}],["motorway",{"maxspeed":"70 mph"}]],
+        "US-GA": [["residential district",{"maxspeed":"30 mph"}],["urban",{"maxspeed":"30 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}],["rural unpaved road",{"maxspeed":"35 mph"}],["US interstate highway",{}]],
+        "US-HI": [["",{}]],
+        "US-IA": [["business district",{"maxspeed":"20 mph"}],["school zone",{"maxspeed":"25 mph"}],["residential district",{"maxspeed":"25 mph"}],["public park",{"maxspeed":"35 mph"}],["Iowa: suburban district",{"maxspeed":"45 mph"}],["Iowa: Institutional road",{"maxspeed":"45 mph"}],["",{"maxspeed":"60 mph"}],["rural",{"maxspeed":"60 mph"}],["rural road without asphalt or concrete surface",{"maxspeed":"55 mph","maxspeed:conditional":"50 mph @ (sunset-sunrise)"}],["motorway",{"maxspeed":"65 mph"}],["US interstate highway",{"maxspeed":"70 mph"}]],
+        "US-ID": [["residential district",{"maxspeed":"35 mph"}],["business district",{"maxspeed":"35 mph"}],["urban",{"maxspeed":"35 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}],["Idaho: State highway",{"maxspeed":"65 mph"}],["US interstate highway",{"maxspeed":"75 mph","maxspeed:hgv:conditional":"65 mph @ (axles>=5 AND weightrating>26000 lb)"}]],
+        "US-IL": [["alley",{"maxspeed":"15 mph"}],["urban",{"maxspeed":"30 mph"}],["",{"maxspeed":"55 mph","maxspeed:bus":"55 mph"}],["rural",{"maxspeed":"55 mph","maxspeed:bus":"55 mph"}],["rural dual carriageway with 2 or more lanes in each direction",{"maxspeed":"65 mph","maxspeed:bus":"65 mph"}],["US interstate highway",{"maxspeed":"70 mph","maxspeed:bus":"70 mph"}]],
+        "US-IN": [["alley",{"maxspeed":"15 mph"}],["urban",{"maxspeed":"30 mph","maxspeed:conditional":"55 mph @ (length>85 ft)"}],["",{"maxspeed":"55 mph","maxspeed:conditional":"55 mph @ (length>85 ft)"}],["rural",{"maxspeed":"55 mph","maxspeed:conditional":"55 mph @ (length>85 ft)"}],["rural dual carriageway with 2 or more lanes in each direction",{"maxspeed":"60 mph","maxspeed:conditional":"55 mph @ (length>85 ft)"}],["rural US interstate highway",{"maxspeed":"70 mph","maxspeed:bus":"70 mph","maxspeed:conditional":"65 mph @ (weightrating>50000 lb); 55 mph @ (length>85 ft)","maxspeed:hgv:conditional":"65 mph @ (weightrating>50000 lb); 55 mph @ (length>85 ft)"}]],
+        "US-KS": [["urban",{"maxspeed":"30 mph","maxspeed:conditional":"55 mph @ (caravan)"}],["",{"maxspeed":"55 mph","maxspeed:conditional":"55 mph @ (caravan)"}],["rural",{"maxspeed":"55 mph","maxspeed:conditional":"55 mph @ (caravan)"}],["Kansas: state highway",{"maxspeed":"65 mph","maxspeed:conditional":"55 mph @ (caravan)"}],["dual carriageway",{"maxspeed":"75 mph","maxspeed:conditional":"55 mph @ (caravan)"}]],
+        "US-KY": [["parking lot",{"maxspeed":"15 mph"}],["residential district",{"maxspeed":"35 mph"}],["business district",{"maxspeed":"35 mph"}],["urban",{"maxspeed":"35 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}],["US interstate highway",{"maxspeed":"65 mph"}]],
+        "US-LA": [["",{"maxspeed":"55 mph"}],["dual carriageway with 2 or more lanes in each direction",{"maxspeed":"65 mph"}],["US interstate highway",{"maxspeed":"70 mph"}],["motorway",{"maxspeed":"70 mph"}]],
+        "US-MA": [["school zone",{"maxspeed":"20 mph"}],["business district",{"maxspeed":"30 mph"}],["residential district",{"maxspeed":"30 mph"}],["urban",{"maxspeed":"30 mph"}],["",{"maxspeed":"40 mph"}],["rural",{"maxspeed":"40 mph"}],["rural dual carriageway",{"maxspeed":"50 mph"}]],
+        "US-MD": [["school zone",{"maxspeed":"15 mph"}],["business district",{"maxspeed":"30 mph"}],["single carriageway in residential district",{"maxspeed":"30 mph"}],["dual carriageway in residential district",{"maxspeed":"35 mph"}],["urban",{"maxspeed":"30 mph"}],["",{"maxspeed":"50 mph"}],["rural",{"maxspeed":"50 mph"}],["rural dual carriageway",{"maxspeed":"55 mph"}]],
+        "US-ME": [["school zone",{"maxspeed":"15 mph"}],["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"45 mph"}]],
+        "US-MI": [["trailer park",{"maxspeed":"15 mph","maxspeed:hgv:conditional":"65 mph @ (weightrating>10000 lb); 65 mph @ (trailer); 65 mph @ (articulated)"}],["business district",{"maxspeed":"25 mph","maxspeed:hgv:conditional":"65 mph @ (weightrating>10000 lb); 65 mph @ (trailer); 65 mph @ (articulated)"}],["residential district",{"maxspeed":"25 mph","maxspeed:hgv:conditional":"65 mph @ (weightrating>10000 lb); 65 mph @ (trailer); 65 mph @ (articulated)"}],["public park",{"maxspeed":"25 mph","maxspeed:hgv:conditional":"65 mph @ (weightrating>10000 lb); 65 mph @ (trailer); 65 mph @ (articulated)"}],["",{"maxspeed":"55 mph","maxspeed:hgv:conditional":"65 mph @ (weightrating>10000 lb); 65 mph @ (trailer); 65 mph @ (articulated)"}],["motorway",{"maxspeed":"70 mph","maxspeed:hgv:conditional":"65 mph @ (weightrating>10000 lb); 65 mph @ (trailer); 65 mph @ (articulated)"}]],
+        "US-MN": [["alley",{"maxspeed":"10 mph"}],["school zone",{"maxspeed":"15 mph"}],["urban US interstate highway",{"maxspeed":"65 mph"}],["urban",{"maxspeed":"30 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}],["expressway",{"maxspeed":"65 mph"}],["motorway",{"maxspeed":"65 mph"}],["rural US interstate highway",{"maxspeed":"70 mph"}]],
+        "US-MO": [["lettered road with 2 lanes",{"maxspeed":"55 mph"}],["urban expressway",{"maxspeed":"60 mph"}],["urban motorway",{"maxspeed":"60 mph"}],["urban US interstate highway",{"maxspeed":"60 mph"}],["",{"maxspeed":"60 mph"}],["rural",{"maxspeed":"60 mph"}],["rural expressway",{"maxspeed":"65 mph"}],["rural motorway",{"maxspeed":"70 mph"}],["rural US interstate highway",{"maxspeed":"70 mph"}]],
+        "US-MS": [["",{"maxspeed":"65 mph"}]],
+        "US-MT": [["urban",{"maxspeed":"25 mph","maxspeed:hgv":"65 mph"}],["",{"maxspeed":"70 mph","maxspeed:conditional":"65 mph @ ((sunset+01:30)-(sunrise-01:30))","maxspeed:hgv":"65 mph"}],["rural",{"maxspeed":"70 mph","maxspeed:conditional":"65 mph @ ((sunset+01:30)-(sunrise-01:30))","maxspeed:hgv":"65 mph"}],["urban US interstate highway",{"maxspeed":"65 mph","maxspeed:hgv":"65 mph"}],["rural US interstate highway",{"maxspeed":"80 mph","maxspeed:hgv":"70 mph"}]],
+        "US-NC": [["urban",{"maxspeed":"35 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}]],
+        "US-ND": [["school zone",{"maxspeed":"20 mph"}],["residential district",{"maxspeed":"25 mph"}],["business district",{"maxspeed":"25 mph"}],["public park",{"maxspeed":"25 mph"}],["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}],["rural dual carriageway with 2 or more lanes in each direction",{"maxspeed":"70 mph"}],["US interstate highway with 2 or more lanes in each direction",{"maxspeed":"75 mph"}]],
+        "US-NE": [["business district",{"maxspeed":"20 mph","maxspeed:conditional":"50 mph @ (caravan)"}],["residential district",{"maxspeed":"25 mph","maxspeed:conditional":"50 mph @ (caravan)"}],["urban",{"maxspeed":"25 mph","maxspeed:conditional":"50 mph @ (caravan)"}],["",{"maxspeed":"55 mph","maxspeed:conditional":"50 mph @ (caravan)"}],["rural",{"maxspeed":"55 mph","maxspeed:conditional":"50 mph @ (caravan)"}],["rural unpaved road",{"maxspeed":"50 mph","maxspeed:conditional":"50 mph @ (caravan)"}],["dual carriageway with 2 or more lanes in each direction",{"maxspeed":"65 mph","maxspeed:conditional":"50 mph @ (caravan)"}],["Nebraska: State highway",{"maxspeed":"65 mph","maxspeed:conditional":"50 mph @ (caravan)"}],["Nebraska: State expressway or super-two highway",{"maxspeed":"70 mph","maxspeed:conditional":"50 mph @ (caravan)"}],["motorway",{"maxspeed":"70 mph","maxspeed:conditional":"50 mph @ (caravan)"}],["US interstate highway",{"maxspeed":"75 mph","maxspeed:conditional":"50 mph @ (caravan)"}]],
+        "US-NH": [["urban school zone",{"maxspeed":"20 mph"}],["business district",{"maxspeed":"30 mph","maxspeed:conditional":"45 mph @ (caravan)"}],["urban residential district",{"maxspeed":"30 mph","maxspeed:conditional":"45 mph @ (caravan)"}],["urban",{"maxspeed":"35 mph","maxspeed:conditional":"45 mph @ (caravan)"}],["",{"maxspeed":"55 mph","maxspeed:conditional":"45 mph @ (caravan)"}],["rural",{"maxspeed":"55 mph","maxspeed:conditional":"45 mph @ (caravan)"}],["rural residential district",{"maxspeed":"35 mph"}],["rural school zone",{"maxspeed":"25 mph"}],["dual carriageway with 2 or more lanes in each direction",{"maxspeed":"65 mph","maxspeed:conditional":"45 mph @ (caravan)"}],["US interstate highway",{"maxspeed":"65 mph","maxspeed:conditional":"45 mph @ (caravan)"}]],
+        "US-NJ": [["school zone",{"maxspeed":"20 mph"}],["urban business district",{"maxspeed":"25 mph"}],["urban residential district",{"maxspeed":"25 mph"}],["urban",{"maxspeed":"25 mph"}],["suburban business district",{"maxspeed":"35 mph"}],["suburban residential district",{"maxspeed":"35 mph"}],["",{"maxspeed":"50 mph"}],["rural",{"maxspeed":"50 mph"}]],
+        "US-NM": [["school zone",{"maxspeed":"15 mph"}],["residential district",{"maxspeed":"30 mph"}],["business district",{"maxspeed":"30 mph"}],["urban",{"maxspeed":"30 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}]],
+        "US-NV": [["school zone",{"maxspeed":"15 mph"}],["",{"maxspeed":"80 mph"}]],
+        "US-NY": [["",{"maxspeed":"55 mph","maxspeed:hgv:conditional":"55 mph @ (weightrating>10000 lb)"}]],
+        "US-OH": [["alley",{"maxspeed":"15 mph"}],["urban motorway",{"maxspeed":"65 mph"}],["urban expressway without traffic lights",{"maxspeed":"65 mph"}],["Ohio: Urban state route",{"maxspeed":"35 mph"}],["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}],["public park",{"maxspeed":"35 mph"}],["rural dual carriageway",{"maxspeed":"60 mph"}],["rural expressway",{"maxspeed":"60 mph"}],["rural expressway without traffic lights",{"maxspeed":"65 mph"}],["rural motorway",{"maxspeed":"70 mph"}]],
+        "US-OK": [["school zone",{"maxspeed":"25 mph"}],["",{"maxspeed":"55 mph"}],["county road",{"maxspeed":"55 mph"}],["state park",{"maxspeed":"35 mph"}],["US interstate highway",{}]],
+        "US-OR": [["alley",{"maxspeed":"15 mph"}],["school zone",{"maxspeed":"25 mph","maxspeed:conditional":"20 mph @ (07:00-17:00)"}],["business district",{"maxspeed":"20 mph","maxspeed:hgv:conditional":"55 mph @ (weightrating>8000 lb AND articulated); 55 mph @ (weightrating>10000 lb)"}],["residential district",{"maxspeed":"25 mph","maxspeed:hgv:conditional":"55 mph @ (weightrating>8000 lb AND articulated); 55 mph @ (weightrating>10000 lb)"}],["public park",{"maxspeed":"25 mph","maxspeed:hgv:conditional":"55 mph @ (weightrating>8000 lb AND articulated); 55 mph @ (weightrating>10000 lb)"}],["",{"maxspeed":"55 mph","maxspeed:hgv:conditional":"55 mph @ (weightrating>8000 lb AND articulated); 55 mph @ (weightrating>10000 lb)"}],["rural",{"maxspeed":"55 mph","maxspeed:hgv:conditional":"55 mph @ (weightrating>8000 lb AND articulated); 55 mph @ (weightrating>10000 lb)"}],["US interstate highway",{"maxspeed":"65 mph","maxspeed:hgv:conditional":"55 mph @ (weightrating>8000 lb AND articulated); 55 mph @ (weightrating>10000 lb)"}]],
+        "US-PA": [["school zone",{"maxspeed":"15 mph"}],["urban road which is not numbered",{"maxspeed":"25 mph"}],["urban",{"maxspeed":"35 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}]],
+        "US-RI": [["school zone",{"maxspeed":"20 mph"}],["business district",{"maxspeed":"25 mph"}],["residential district",{"maxspeed":"25 mph"}],["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"50 mph","maxspeed:conditional":"45 mph @ ((sunset+00:30)-(sunrise-00:30))"}],["rural",{"maxspeed":"50 mph","maxspeed:conditional":"45 mph @ ((sunset+00:30)-(sunrise-00:30))"}]],
+        "US-SC": [["urban",{"maxspeed":"30 mph","maxspeed:conditional":"45 mph @ (caravan)"}],["",{"maxspeed":"55 mph","maxspeed:conditional":"45 mph @ (caravan)"}],["rural",{"maxspeed":"55 mph","maxspeed:conditional":"45 mph @ (caravan)"}],["rural unpaved road",{"maxspeed":"40 mph"}]],
+        "US-SD": [["school zone",{"maxspeed":"15 mph"}],["urban",{"maxspeed":"25 mph","maxspeed:conditional":"45 mph @ (caravan)"}],["",{"maxspeed":"65 mph","maxspeed:conditional":"45 mph @ (caravan)"}],["rural",{"maxspeed":"65 mph","maxspeed:conditional":"45 mph @ (caravan)"}],["US interstate highway",{"maxspeed":"80 mph","maxspeed:conditional":"55 mph @ (caravan)"}]],
+        "US-TN": [["school zone",{"maxspeed":"15 mph"}],["",{"maxspeed":"65 mph"}],["rural",{"maxspeed":"65 mph"}],["Tennessee: Rural state road with 2 or more lanes in each direction",{"maxspeed":"70 mph"}],["US interstate highway with 2 or more lanes in each direction",{"maxspeed":"70 mph"}]],
+        "US-TX": [["alley",{"maxspeed":"15 mph"}],["urban",{"maxspeed":"30 mph"}],["",{"maxspeed":"60 mph"}],["rural",{"maxspeed":"60 mph"}],["rural numbered road",{"maxspeed":"70 mph"}]],
+        "US-UT": [["school zone",{"maxspeed":"20 mph"}],["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}]],
+        "US-VA": [["school zone",{"maxspeed":"25 mph"}],["business district",{"maxspeed":"25 mph"}],["residential district",{"maxspeed":"25 mph"}],["urban",{"maxspeed":"35 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}],["rural unpaved road",{"maxspeed":"35 mph"}],["Virginia: Rustic road",{"maxspeed":"35 mph"}],["Virginia: State primary highway",{"maxspeed":"55 mph"}],["rural road with 2 or more lanes in each direction",{"maxspeed":"55 mph"}],["motorway",{"maxspeed":"55 mph"}],["US interstate highway",{"maxspeed":"55 mph"}]],
+        "US-VT": [["",{"maxspeed":"50 mph"}]],
+        "US-WA": [["school zone",{"maxspeed":"20 mph"}],["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"50 mph"}],["rural",{"maxspeed":"50 mph"}],["Washington: State highway",{"maxspeed":"60 mph","maxspeed:conditional":"60 mph @ (weightrating>10000 lb); 60 mph @ (trailer); 60 mph @ (articulated)"}]],
+        "US-WI": [["school zone",{"maxspeed":"15 mph"}],["alley",{"maxspeed":"15 mph"}],["urban",{"maxspeed":"25 mph"}],["Wisconsin: semiurban or outlying district",{"maxspeed":"35 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}],["Wisconsin: Rustic road",{"maxspeed":"40 mph"}],["rural dual carriageway with 2 or more lanes in each direction",{"maxspeed":"65 mph"}],["motorway",{"maxspeed":"70 mph"}]],
+        "US-WV": [["school zone",{"maxspeed":"15 mph"}],["business district",{"maxspeed":"25 mph"}],["residential district",{"maxspeed":"25 mph"}],["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"55 mph"}],["rural",{"maxspeed":"55 mph"}]],
+        "US-WY": [["school zone",{"maxspeed":"20 mph"}],["residential district",{"maxspeed":"30 mph"}],["urban",{"maxspeed":"30 mph"}],["",{"maxspeed":"65 mph"}],["rural",{"maxspeed":"65 mph"}],["rural road without asphalt or concrete surface",{"maxspeed":"55 mph"}],["Wyoming: State highway",{"maxspeed":"70 mph"}],["US interstate highway",{"maxspeed":"75 mph"}]],
+        "UY": [["school zone",{"maxspeed":"20"}],["urban",{"maxspeed":"45"}],["",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:coach":"90","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80"}],["rural",{"maxspeed":"90","maxspeed:bus":"80","maxspeed:coach":"90","maxspeed:conditional":"80 @ (trailer)","maxspeed:hgv":"80"}]],
+        "UZ": [["urban residential district",{"maxspeed":"30"}],["urban",{"maxspeed":"70"}],["",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:coach":"90","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}],["rural",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:coach":"90","maxspeed:conditional":"80 @ (trailer)","maxspeed:goods:conditional":"70 @ (trailer)","maxspeed:hgv":"80","maxspeed:hgv:conditional":"70 @ (trailer)"}]],
+        "VE": [["urban",{"maxspeed":"40"}],["",{"maxspeed":"70","maxspeed:conditional":"50 @ (sunset-sunrise)"}],["rural",{"maxspeed":"70","maxspeed:conditional":"50 @ (sunset-sunrise)"}],["motorway",{"maxspeed":"90"}]],
+        "VI": [["urban",{"maxspeed":"20 mph","maxspeed:bus":"10 mph","maxspeed:hgv":"10 mph"}],["",{"maxspeed":"35 mph","maxspeed:bus":"30 mph","maxspeed:hgv":"30 mph"}],["rural",{"maxspeed":"35 mph","maxspeed:bus":"30 mph","maxspeed:hgv":"30 mph"}]],
+        "VN": [["urban single carriageway",{"maxspeed":"50"}],["urban one-way road with 1 lane",{"maxspeed":"50"}],["urban dual carriageway with 2 or more lanes in each direction",{"maxspeed":"60"}],["",{"maxspeed":"80","maxspeed:bus":"60","maxspeed:coach":"70","maxspeed:conditional":"70 @ (seats>=31); 50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (weightcapacity>3.5); 60 @ (trailer)"}],["rural single carriageway",{"maxspeed":"80","maxspeed:bus":"60","maxspeed:coach":"70","maxspeed:conditional":"70 @ (seats>=31); 50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (weightcapacity>3.5); 60 @ (trailer)"}],["rural single carriageway",{"maxspeed":"80","maxspeed:bus":"60","maxspeed:coach":"70","maxspeed:conditional":"70 @ (seats>=31); 50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (weightcapacity>3.5); 60 @ (trailer)"}],["rural one-way road with 1 lane",{"maxspeed":"80","maxspeed:bus":"60","maxspeed:coach":"70","maxspeed:conditional":"70 @ (seats>=31); 50 @ (trailer)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (weightcapacity>3.5); 60 @ (trailer)"}],["rural dual carriageway with 2 or more lanes in each direction",{"maxspeed":"90","maxspeed:bus":"70","maxspeed:coach":"80","maxspeed:conditional":"80 @ (seats>=31); 60 @ (trailer)","maxspeed:goods":"90","maxspeed:goods:conditional":"80 @ (weightcapacity>3.5); 70 @ (trailer)"}],["motorway",{"maxspeed":"120"}]],
+        "WS": [["urban",{"maxspeed":"25 mph"}],["",{"maxspeed":"35 mph"}],["rural",{"maxspeed":"35 mph"}]],
+        "XK": [["urban school zone",{"maxspeed:conditional":"30 @ (07:00-20:00)"}],["urban",{"maxspeed":"50","maxspeed:bus":"80","maxspeed:conditional":"80 @ (caravan)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer); 70 @ (weightrating>7.5)"}],["",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:conditional":"80 @ (caravan)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer); 70 @ (weightrating>7.5)"}],["rural",{"maxspeed":"80","maxspeed:bus":"80","maxspeed:conditional":"80 @ (caravan)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer); 70 @ (weightrating>7.5)"}],["rural school zone",{"maxspeed":"50","maxspeed:bus":"80","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer); 70 @ (weightrating>7.5)"}],["rural dual carriageway",{"maxspeed":"100","maxspeed:bus":"80","maxspeed:conditional":"80 @ (caravan)","maxspeed:goods":"80","maxspeed:goods:conditional":"70 @ (trailer); 70 @ (weightrating>7.5)"}],["motorroad",{"maxspeed":"110","maxspeed:bus":"100","maxspeed:bus:conditional":"80 @ (weightrating>12)","maxspeed:conditional":"80 @ (caravan)","maxspeed:goods":"85","maxspeed:goods:conditional":"80 @ (trailer); 70 @ (weightrating>12)"}],["motorway",{"maxspeed":"130","maxspeed:bus":"100","maxspeed:bus:conditional":"80 @ (weightrating>12)","maxspeed:conditional":"80 @ (caravan)","maxspeed:goods":"85","maxspeed:goods:conditional":"80 @ (trailer); 70 @ (weightrating>12)"}]],
+        "ZA": [["urban",{"maxspeed":"60","maxspeed:bus":"100","maxspeed:hgv:conditional":"80 @ (weightrating>9)"}],["",{"maxspeed":"100","maxspeed:bus":"100","maxspeed:hgv:conditional":"80 @ (weightrating>9)"}],["rural",{"maxspeed":"100","maxspeed:bus":"100","maxspeed:hgv:conditional":"80 @ (weightrating>9)"}],["motorway",{"maxspeed":"120","maxspeed:bus":"100","maxspeed:hgv:conditional":"80 @ (weightrating>9)"}]],
+        "ZM": [["urban",{"maxspeed":"40"}],["",{"maxspeed":"100","maxspeed:hgv":"80"}],["rural",{"maxspeed":"100","maxspeed:hgv":"80"}]],
+      },
+    };
+  }
+  // END GENERATED DEFAULT SPEEDS
 })();

@@ -10,20 +10,20 @@
 const POPUP_TEXT = {
   de: {
     enabled: 'Färbung', signs: 'Schilder', extras: 'Zusatzschilder (Nässe, Uhrzeit …)', types: 'Arten anzeigen',
-    legend: 'Legende auf der Karte', vehicle: 'Fahrzeug', unit: 'Einheit', lang: 'Sprache',
+    defaults: 'Standardwerte des Landes (grau)', legend: 'Legende auf der Karte', vehicle: 'Fahrzeug', unit: 'Einheit', lang: 'Sprache',
     noSpeed: 'Ohne maxspeed nur weiß gestrichelt:',
     footer: 'Gilt sofort in allen offenen iD-Tabs.',
   },
   en: {
     enabled: 'Colouring', signs: 'Signs', extras: 'Extra signs (wet, times …)', types: 'Types shown',
-    legend: 'Legend on map', vehicle: 'Vehicle', unit: 'Unit', lang: 'Language',
+    defaults: 'Country defaults (grey)', legend: 'Legend on map', vehicle: 'Vehicle', unit: 'Unit', lang: 'Language',
     noSpeed: 'Without maxspeed only white dashes:',
     footer: 'Applies at once to all open iD tabs.',
   },
 };
 
-/** On/off switches; each id equals its settings key. @type {Array<'enabled'|'signs'|'extras'|'legend'>} */
-const SWITCHES = ['enabled', 'signs', 'extras', 'legend'];
+/** On/off switches; each id equals its settings key. @type {Array<'enabled'|'signs'|'extras'|'defaults'|'legend'>} */
+const SWITCHES = ['enabled', 'signs', 'extras', 'defaults', 'legend'];
 
 /**
  * Element by id, checked to be of the expected type (fails loudly if popup.html changes).

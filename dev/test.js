@@ -15,8 +15,8 @@ eq('zone:maxspeed ohne maxspeed', W({ 'zone:maxspeed': 'DE:30' }), ['limit 30', 
 eq('none → Richt 130', W({ highway: 'motorway', maxspeed: 'none' }), ['limit 130 richt', '-']);
 eq('none + advisory 120', W({ maxspeed: 'none', 'maxspeed:advisory': '120' }), ['limit 120 richt', 'limit 120 richt']);
 eq('DE:motorway → Richt', W({ highway: 'motorway', maxspeed: 'DE:motorway' }), ['limit 130 richt', '-']);
-eq('walk', W({ maxspeed: 'walk' }), ['limit 7 🚶', 'limit 7 🚶']);
-eq('living_street leer', W({ highway: 'living_street' }), ['limit 7 🚶', 'limit 7 🚶']);
+eq('walk', W({ maxspeed: 'walk' }), ['limit 5 🚶', 'limit 5 🚶']);
+eq('living_street leer', W({ highway: 'living_street' }), ['limit 5 🚶', 'limit 5 🚶']);
 eq('signals', W({ maxspeed: 'signals' }), ['variable 0', 'variable 0']);
 eq('fehlt', W({}), ['missing 0', 'missing 0']);
 eq('Fußweg', W({ highway: 'footway' }), ['noSpeed 0', 'noSpeed 0']);
@@ -50,7 +50,10 @@ eq('lanes forward/backward', W({ maxspeed: '100', 'maxspeed:lanes:forward': '100
 eq('lanes auf Zweirichtung ohne :forward ignoriert', W({ maxspeed: '100', 'maxspeed:lanes': '100|80|80|100' }), ['limit 100', 'limit 100']);
 eq('lanes mit none', W({ highway: 'motorway', 'maxspeed:lanes': 'none|120' }), ['limit 120 130|120', '-']);
 // Sonstiges
-eq('Zufahrt beschränkt', api.waySpeed({ highway: 'service', access: 'private' }, []).restricted, true);
+eq('Zufahrt beschränkt', api.waySpeed({ highway: 'residential', access: 'private' }, []).restricted, true);
+// highway=service gehört nicht zum öffentlichen Netz: fehlendes maxspeed rot auf Grau statt auf Weiß
+eq('service ohne maxspeed: rot auf Grau', [{ highway: 'service' }, { highway: 'residential' }].map((t) => api.lineStyleFor(t, []).stripes[0].look.under),
+  ['#9e9e9e', '#ffffff']);
 eq('Kreisverkehr einbahn', api.onewayOf({ highway: 'primary', junction: 'roundabout' }), 1);
 eq('Autobahn oneway=no', api.onewayOf({ highway: 'motorway', oneway: 'no' }), 0);
 eq('Unsinn-Werte', [api.parseSpeed('-5'), api.parseSpeed('9999'), api.parseSpeed(42), api.parseSpeed('fast')], [null, null, null, null]);
@@ -105,8 +108,11 @@ const NV = api.waySpeed({ highway: 'motorway', maxspeed: 'none', 'maxspeed:varia
 eq('none + variable: Richt 130, ohne Limit', [NV.status, NV.kmh, NV.advisory, NV.unlimited, NV.variable], ['limit', 130, true, true, true]);
 eq('variable keine 274.1', SYM({ maxspeed: 'DE:zone30', 'maxspeed:variable': 'yes' }), '');
 eq('Zeichen 325.1', [SYM({ highway: 'living_street' }), SYM({ highway: 'living_street', maxspeed: 'walk' }), SYM({ highway: 'living_street', maxspeed: '20' }), SYM({ highway: 'residential', maxspeed: 'walk' })], ['325.1', '325.1', '', '']);
-eq('Tooltip 325.1', api.signTooltip(D({ highway: 'living_street' })), 'Verkehrsberuhigter Bereich (Zeichen 325.1): Schrittgeschwindigkeit – implizit\nhighway=living_street');
-eq('Zeichen 244.1', [SYM({ highway: 'residential', bicycle_road: 'yes' }), SYM({ highway: 'residential', cyclestreet: 'yes', maxspeed: '30' }), SYM({ highway: 'residential', bicycle_road: 'yes', maxspeed: '20' })], ['244.1', '244.1', '']);
+eq('Tooltip 325.1', api.signTooltip(D({ highway: 'living_street' })), 'Verkehrsberuhigter Bereich (Zeichen 325.1): Schrittgeschwindigkeit\nhighway=living_street');
+// 244.1 ist bei 30 das Hauptschild; bei anderem Tempo steht es daneben (bicycleRoad = auslösender Tag)
+eq('Zeichen 244.1', [{ highway: 'residential', bicycle_road: 'yes' }, { highway: 'residential', cyclestreet: 'yes', maxspeed: '30' }, { highway: 'residential', bicycle_road: 'yes', maxspeed: '20' },
+  { highway: 'residential', 'source:maxspeed': 'DE:bicycle_road', maxspeed: '30' }, { highway: 'residential', maxspeed: '30' }].map((t) => { const d = D(t); return [d.symbol, d.bicycleRoad]; }),
+  [['244.1', 'bicycle_road=yes'], ['244.1', 'cyclestreet=yes'], ['', 'bicycle_road=yes'], ['244.1', 'source:maxspeed=DE:bicycle_road'], ['', '']]);
 eq('Fahrradstraße ohne maxspeed → 30', short(D({ highway: 'residential', bicycle_road: 'yes' })), 'limit 30');
 eq('Zeichen 274.1', [SYM({ maxspeed: 'DE:zone30' }), SYM({ maxspeed: 'DE:zone:30' }), SYM({ maxspeed: '30', 'zone:maxspeed': 'DE:30' }), SYM({ 'zone:maxspeed': 'DE:30' }), SYM({ maxspeed: 'DE:zone20' }), SYM({ maxspeed: '50', 'zone:maxspeed': 'DE:30' }), SYM({ maxspeed: '30', 'maxspeed:type': 'DE:urban' })],
   ['274.1', '274.1', '274.1', '274.1', '274.1-20', '', '']);
@@ -134,16 +140,113 @@ eq('Zusatz nur bedingt unter Hauptschild', api.mainPanels(D({ 'maxspeed:conditio
 api.setDisplay({ unit: 'mph', lang: 'en' });
 eq('mph Schild', api.signLabel(D({ maxspeed: '30 mph' })), '30');
 eq('mph Band', api.bandFor(D({ maxspeed: '30 mph' }).kmh).color, '#c6ff00'); // Band 26–30
-eq('Tooltip Richtgeschw. en', api.signTooltip(D({ maxspeed: 'none' })), '81 mph – advisory speed\nmaxspeed=none');
+eq('Tooltip Richtgeschw. en', api.signTooltip(D({ maxspeed: 'none' })), '81 mph – advisory speed, implicit\nmaxspeed=none');
+eq('Tooltip Richtgeschw. getaggt en', api.signTooltip(D({ maxspeed: 'none', 'maxspeed:advisory': '120' })), '75 mph – advisory speed\nmaxspeed=none');
 api.setDisplay({ unit: 'kmh', lang: 'de' });
 eq('Bandtext', [api.bandLabel(api.colorBands()[0]), api.bandLabel(api.colorBands()[2]), api.bandLabel(api.colorBands()[12])], ['≤ 5', '30–39', '≥ 130']);
 // Einstellungen aus der Nachricht
 eq('Einstellungen kaputt', api.checkSettings({ enabled: 'ja', vehicle: '<b>', unit: 'x', hiddenExtras: [1, 'wet'] }),
-  { enabled: true, signs: true, extras: true, legend: true, hiddenExtras: ['wet'], vehicle: 'car', unit: 'kmh', lang: 'de' });
+  { enabled: true, signs: true, extras: true, legend: true, defaults: true, hiddenExtras: ['wet'], vehicle: 'car', unit: 'kmh', lang: 'de' });
 api.setVehicles([['car', [], '🚗', 'PKW', 'Car'], ['hgv', ['hgv'], '🚛', 'LKW', 'Truck'], ['bad', ['x y'], '', '', ''], 'quatsch']);
 eq('Fahrzeuge geprüft', [api.suffixesFor('hgv'), api.suffixesFor('bad'), api.suffixesFor('car')], [['hgv'], [], []]);
 api.setVehicles('quatsch');
 eq('Fahrzeuge bleiben', api.suffixesFor('hgv'), ['hgv']);
+
+// Tag-Filter (Syntax wie osm-legal-default-speeds)
+const F = (filter, tags, placeholders = {}) => api.compileTagFilter(filter)(tags, (name) => !!placeholders[name]);
+eq('Filter =, !=, Schlüssel', [F('highway=primary', { highway: 'primary' }), F('highway!=primary', {}), F('lit', { lit: 'no' }), F('!lit', { lit: 'no' })], [true, true, true, false]);
+eq('Filter ~ ganzer Wert', [F('highway~trunk|primary', { highway: 'primary' }), F('highway~trunk|primary', { highway: 'primary_link' }), F('highway!~trunk', {})], [true, false, true]);
+eq('Filter Schlüssel-Regex', [F('~maxspeed:.*', { 'maxspeed:hgv': '80' }), F('~sidewalk.* ~ yes|both', { 'sidewalk:left': 'yes' }), F('!~sidewalk.*', { sidewalk: 'no' })], [true, true, false]);
+eq('Filter Vergleich mit Einheit', [F('width<=7.6', { width: '7.5' }), F('width<=7.6', { width: '25 ft' }), F('lanes>=2', { lanes: 'zwei' })], [true, false, false]);
+eq('Filter Klammern, and vor or', [F('a or b and c', { a: '1' }), F('(a or b) and c', { a: '1' }), F('!(a or b)', { c: '1' })], [true, false, true]);
+eq('Filter Platzhalter und Anführung', [F('{rural} and ref~"(US|AL).*"', { ref: 'US 1' }, { rural: true }), F('!{urban}', {}, { urban: true })], [true, false]);
+eq('Filter kaputt', ['highway=', '(a', 'a and', '"offen'].map((f) => { try { api.compileTagFilter(f); return 'ok'; } catch { return 'Fehler'; } }), ['Fehler', 'Fehler', 'Fehler', 'Fehler']);
+let filterErrors = 0;
+for (const f of Object.values(api.defaultSpeeds().roadTypes)) { try { if (f) api.compileTagFilter(f); } catch { filterErrors++; } }
+eq('alle Filter der Tabelle lesbar', filterErrors, 0);
+
+// Standardwerte des Landes (grau, wenn maxspeed fehlt); eigener Block wegen D oben
+{
+const D = (tags, veh = [], country = 'DE') => {
+  const d = api.waySpeed(tags, veh, country).forward;
+  const f = d && d.fallback;
+  return f ? [d.status, Math.round(f.info.kmh), f.info.advisory ? 'richt' : '', f.roadType || 'übrige'].filter((x) => x !== '').join(' ') : d && d.status;
+};
+const URBAN = { 'zone:traffic': 'DE:urban' };
+const RURAL = { 'zone:traffic': 'DE:rural' };
+// Innerorts/außerorts nur aus Tags, die es sagen – nie aus lit, Gehweg oder residential
+eq('DE ohne zone:traffic: offen', [D({ highway: 'primary' }), D({ highway: 'residential' }), D({ highway: 'primary', lit: 'yes', sidewalk: 'both' })], ['missing', 'missing', 'missing']);
+eq('DE zone:traffic urban', D({ highway: 'residential', ...URBAN }), 'missing 50 urban');
+eq('DE zone:traffic rural', D({ highway: 'primary', ...RURAL }), 'missing 100 rural');
+eq('DE rural=no / source:maxspeed', [D({ highway: 'primary', rural: 'no' }), D({ highway: 'primary', 'source:maxspeed': 'sign', 'maxspeed:type': 'DE:rural' })], ['missing 50 urban', 'limit']);
+eq('DE zone:traffic:left = :right', D({ highway: 'primary', 'zone:traffic:left': 'DE:urban', 'zone:traffic:right': 'DE:urban' }), 'missing 50 urban');
+eq('DE zone:traffic:left ≠ :right: offen', D({ highway: 'primary', 'zone:traffic:left': 'DE:urban', 'zone:traffic:right': 'DE:rural' }), 'missing');
+eq('DE Autobahn → Richt 130 (ohne zone:traffic)', D({ highway: 'motorway', oneway: 'yes' }), 'missing 130 richt motorway');
+eq('DE zweibahnig außerorts → Richt 130', D({ highway: 'trunk', oneway: 'yes', dual_carriageway: 'yes', ...RURAL }), 'missing 130 richt rural dual carriageway');
+eq('DE LKW außerorts', D({ highway: 'primary', ...RURAL }, ['hgv']), 'missing 80 rural');
+eq('DE LKW innerorts: 80 gilt nicht über 50', D({ highway: 'residential', ...URBAN }, ['hgv']), 'missing 50 urban');
+eq('DE Anhänger aus (trailer)', D({ highway: 'primary', ...RURAL }, ['trailer', 'caravan']), 'missing 80 rural');
+eq('DE Bus', D({ highway: 'primary', ...RURAL }, ['bus', 'coach']), 'missing 80 rural');
+eq('getaggt geht vor', D({ highway: 'primary', maxspeed: '70', ...RURAL }), 'limit');
+eq('Standardwerte aus', D({ highway: 'primary', ...RURAL }, [], null), 'missing');
+eq('Land unbekannt, zone:traffic nennt es', [D({ highway: 'primary', ...RURAL }, [], ''), D({ highway: 'primary' }, [], '')], ['missing 100 rural', 'missing']);
+eq('Region aus zone:traffic (BE-VLG)', [D({ highway: 'primary', 'zone:traffic': 'BE-VLG:rural' }, [], ''), D({ highway: 'primary', 'zone:traffic': 'BE-WAL:rural' }, [], '')], ['missing 70 rural', 'missing 90 rural']);
+eq('zone:traffic eines anderen Landes zählt nicht als Tabelle', D({ highway: 'primary', 'zone:traffic': 'BE-VLG:rural' }, [], 'DE'), 'missing 100 rural');
+eq('unbekanntes Land', D({ highway: 'primary', ...RURAL }, [], 'ZZ'), 'missing');
+eq('Unterteilung ohne eigene Zeilen → Land', D({ highway: 'primary', ...RURAL }, [], 'DE-BY'), 'missing 100 rural');
+eq('Land ohne innerorts/außerorts: übrige Straßen', [D({ highway: 'primary' }, [], 'HK'), D({ highway: 'primary' }, [], 'GG')], ['missing 50 übrige', 'missing 56 übrige']);
+eq('Straßenart ohne Filter: offen (BR)', D({ highway: 'primary' }, [], 'BR'), 'missing');
+eq('Fußweg bleibt ohne Schild', D({ highway: 'footway', ...URBAN }), 'noSpeed');
+eq('nur LKW getaggt: PKW-Standardwert', D({ highway: 'primary', 'maxspeed:hgv': '60', ...RURAL }), 'missing 100 rural');
+eq('Standardwert-Tooltip', api.defaultTooltip(api.waySpeed({ highway: 'residential', ...URBAN }, [], 'DE').forward.fallback).split('\n'),
+  ['50 km/h', 'Standardwert des Landes – maxspeed ist nicht getaggt', 'Deutschland, Straßenart „urban“', 'Quelle: OSM-Wiki „Default speed limits“']);
+// Farbig nur, was explizit als Zahl (none, walk) getaggt ist; alles andere grau
+const GREY = (tags) => api.isGreySign(api.waySpeed({ highway: 'residential', ...tags }, [], 'DE').forward);
+eq('farbig: explizit getaggt', [{ maxspeed: '50' }, { maxspeed: '50', 'source:maxspeed': 'DE:urban' }, { maxspeed: '30', 'zone:maxspeed': 'DE:30' },
+  { highway: 'living_street', maxspeed: 'walk' }, { 'maxspeed:conditional': '30 @ wet' }, { 'maxspeed:advisory': '40' }, { highway: 'motorway', maxspeed: 'none', 'maxspeed:advisory': '120' },
+  { highway: 'living_street' }, { highway: 'living_street', ...URBAN },
+  // Autobahn: Richtgeschwindigkeit 130 gilt von sich aus (an der Grenze beschildert), wird nicht getaggt
+  { highway: 'motorway', maxspeed: 'none' }, { highway: 'motorway_link', maxspeed: 'none' }, { highway: 'trunk', maxspeed: 'none', 'maxspeed:advisory': '130' }].map(GREY),
+  [false, false, false, false, false, false, false, false, false, false, false, false]);
+eq('grau: implizit oder Standardwert', [{ maxspeed: 'DE:urban' }, { 'source:maxspeed': 'DE:urban' }, { 'maxspeed:type': 'DE:urban' }, { 'zone:maxspeed': 'DE:30' },
+  { bicycle_road: 'yes' }, { highway: 'trunk', maxspeed: 'none' }, { highway: 'motorway', maxspeed: 'DE:motorway' }, { highway: 'motorway', oneway: 'yes' }, URBAN].map(GREY),
+  [true, true, true, true, true, true, true, true, true]);
+api.setDisplay({ unit: 'kmh', lang: 'de' });
+eq('verkehrsberuhigt: Zeichen 325.1, Linie ≤ 5', (() => { const s = api.lineStyleFor({ highway: 'living_street', ...URBAN }, [], 'DE'); return [s.signs[0].info.symbol, s.stripes[0].look.color]; })(),
+  ['325.1', api.colorBands()[0].color]);
+eq('kein Schild: fehlt ohne Standardwert', GREY({}), false);
+// Tempo-30/20-Zone: farbig nur mit maxspeed; source:maxspeed / zone:maxspeed allein → graues Zeichen 274.1
+const ZONE = (tags) => { const d = api.waySpeed({ highway: 'residential', ...tags }, [], 'DE').forward; return [d.kmh, d.symbol, api.isGreySign(d) ? 'grau' : 'farbig'].join(' '); };
+eq('Zone 30', [{ maxspeed: '30', 'source:maxspeed': 'DE:zone30', 'zone:maxspeed': 'DE:30' }, { 'source:maxspeed': 'DE:zone30' }, { 'zone:maxspeed': 'DE:30' },
+  { 'source:maxspeed': 'DE:zone30', 'zone:maxspeed': 'DE:30' }].map(ZONE), ['30 274.1 farbig', '30 274.1 grau', '30 274.1 grau', '30 274.1 grau']);
+// Fahrradstraße (244.1): ohne maxspeed implizit 30 (grau); für Fahrzeuge freigegeben → maxspeed „fehlt“
+const BR = (tags) => {
+  const d = api.waySpeed({ highway: 'cycleway', ...tags }, [], 'DE').forward;
+  const i = d.fallback ? d.fallback.info : d;
+  // Hauptschild (Zahl oder Zeichen) und ob 244.1 daneben gezeichnet wird
+  return [d.status, i.kmh, i.symbol || 'Zahl', i.bicycleRoad && i.symbol !== '244.1' ? '+244.1' : '', api.isGreySign(d) ? 'grau' : 'farbig'].filter(Boolean).join(' ');
+};
+eq('Fahrradstraße ohne maxspeed: graues 244.1', [{ bicycle_road: 'yes' }, { bicycle_road: 'yes', vehicle: 'no' }, { 'source:maxspeed': 'DE:bicycle_road' },
+  { bicycle_road: 'yes', 'source:maxspeed': 'DE:bicycle_road' }].map(BR), ['limit 30 244.1 grau', 'limit 30 244.1 grau', 'limit 30 244.1 grau', 'limit 30 244.1 grau']);
+eq('Fahrradstraße 30: farbiges 244.1; sonst Tempo/Zone + 244.1', [{ bicycle_road: 'yes', maxspeed: '30', 'source:maxspeed': 'DE:bicycle_road' }, { bicycle_road: 'yes', maxspeed: '20' },
+  { bicycle_road: 'yes', maxspeed: '20', 'zone:maxspeed': 'DE:20', 'source:maxspeed': 'DE:zone20' }, { bicycle_road: 'yes', vehicle: 'destination', maxspeed: '30' }].map(BR),
+  ['limit 30 244.1 farbig', 'limit 20 Zahl +244.1 farbig', 'limit 20 274.1-20 +244.1 farbig', 'limit 30 244.1 farbig']);
+eq('Fahrradstraße freigegeben ohne maxspeed', [{ bicycle_road: 'yes', vehicle: 'destination' }, { bicycle_road: 'yes', motor_vehicle: 'yes' }, { bicycle_road: 'yes', vehicle: 'no', motorcar: 'destination' }].map(BR),
+  ['missing 30 244.1 grau', 'missing 30 244.1 grau', 'missing 30 244.1 grau']);
+eq('Fahrradstraße freigegeben: Tooltip', api.defaultTooltip(api.waySpeed({ highway: 'cycleway', bicycle_road: 'yes', vehicle: 'destination' }, [], 'DE').forward.fallback).split('\n'),
+  ['Fahrradstraße (Zeichen 244.1): 30 km/h – implizit', 'bicycle_road=yes', 'maxspeed fehlt: Fahrradstraße für Fahrzeuge freigegeben (vehicle=destination)']);
+// Die drei Fahrradstraßen aus OSM (Luisen-/Casinostraße, 2026-10-25): 30 → 244.1; 20 → Tempo bzw. Zone + 244.1
+const OSM = [
+  { bicycle: 'designated', bicycle_road: 'yes', highway: 'residential', lanes: '3', 'lanes:backward': '2', 'lanes:forward': '1', maxspeed: '30', motor_vehicle: 'destination', 'source:maxspeed': 'DE:bicycle_road', vehicle: 'destination' },
+  { bicycle: 'designated', bicycle_road: 'yes', highway: 'residential', lanes: '2', maxspeed: '20', motor_vehicle: 'destination', oneway: 'yes', 'source:maxspeed': 'DE:bicycle_road', 'zone:maxspeed': 'DE:20' },
+  { bicycle: 'designated', bicycle_road: 'yes', hgv: 'destination', highway: 'residential', lanes: '1', maxspeed: '20', motor_vehicle: 'destination', oneway: 'yes', 'source:maxspeed': 'DE:bicycle_road' },
+];
+eq('Fahrradstraßen aus OSM', OSM.map((t) => BR(t)), ['limit 30 244.1 farbig', 'limit 20 274.1-20 +244.1 farbig', 'limit 20 Zahl +244.1 farbig']);
+eq('Fahrradstraße freigegeben: Linie „fehlt“', api.lineStyleFor({ highway: 'cycleway', bicycle_road: 'yes', motor_vehicle: 'yes' }, [], 'DE').stripes[0].look.color, '#e53935');
+eq('Zone 20', [{ maxspeed: '20', 'source:maxspeed': 'DE:zone20', 'zone:maxspeed': 'DE:20' }, { 'source:maxspeed': 'DE:zone20' }, { 'zone:maxspeed': 'DE:20' },
+  { 'source:maxspeed': 'DE:zone20', 'zone:maxspeed': 'DE:20' }].map(ZONE), ['20 274.1-20 farbig', '20 274.1-20 grau', '20 274.1-20 grau', '20 274.1-20 grau']);
+eq('Linie bleibt „fehlt“', JSON.stringify(api.lineStyleFor({ highway: 'primary', ...RURAL }, [], 'DE').stripes) === JSON.stringify(api.lineStyleFor({ highway: 'primary', ...RURAL }, []).stripes), true);
+}
 
 console.log(fail ? `${fail} Tests fehlgeschlagen` : 'Alle Tests bestanden');
 process.exitCode = fail ? 1 : 0;

@@ -17,6 +17,7 @@
  * @property {boolean} signs         Draw speed-limit signs on the roads.
  * @property {boolean} extras        Draw the small extra signs for conditional limits (wet, times …).
  * @property {string[]} hiddenExtras Kinds of extra signs the user switched off (keys of OMC_EXTRA_TYPES).
+ * @property {boolean} defaults      Show the country's legal default as a grey sign where maxspeed is missing.
  * @property {boolean} legend        Show the legend box on the map.
  * @property {string} vehicle        Key of OMC_VEHICLES, e.g. "car" or "hgv".
  * @property {'kmh'|'mph'} unit      Display unit. Values are converted to km/h internally.
@@ -42,6 +43,7 @@ const OMC_DEFAULTS = Object.freeze({
   signs: true,
   extras: true,
   hiddenExtras: [],
+  defaults: true,
   legend: true,
   vehicle: 'car',
   unit: 'kmh',
@@ -105,6 +107,7 @@ function omcCleanSettings(input) {
     enabled: bool('enabled', OMC_DEFAULTS.enabled),
     signs: bool('signs', OMC_DEFAULTS.signs),
     extras: bool('extras', OMC_DEFAULTS.extras),
+    defaults: bool('defaults', OMC_DEFAULTS.defaults),
     legend: bool('legend', OMC_DEFAULTS.legend),
     hiddenExtras: Array.isArray(s.hiddenExtras)
       ? s.hiddenExtras.filter((k) => typeof k === 'string' && knownExtras.has(k))

@@ -18,12 +18,24 @@ What you see on the map:
 - **Speed-limit signs** on the roads: a red ring for a legal maximum, a blue square for an
   advisory speed, 🚶 for `walk`, a dark sign with ≈ for electronic signs without a usual
   maximum (`maxspeed:variable` alone, or the outdated `maxspeed=signals`). Hover over a
-  sign to see the tag it came from; implicit values such as `DE:urban` are marked.
+  sign to see the tag it came from. **Only a speed tagged explicitly is in colour**
+  (a number, `none`, `walk`). Everything else is grey: implicit values such as
+  `maxspeed=DE:urban`, `source:maxspeed` or `maxspeed:type` without `maxspeed`, an untagged
+  bicycle road, the advisory 130 for `maxspeed=none` without `maxspeed:advisory` on roads
+  other than motorways, and the country defaults (below). On motorways `maxspeed=none`
+  shows the advisory 130 in colour: in Germany it is the rule itself, signed at the
+  border, and not tagged per road. A living street (`highway=living_street`) is in colour even
+  without `maxspeed`: it means walking pace by itself, and walking pace has the colour of
+  “≤ 5”.
 - **Official German signs** where one sign says it all: 325.1 living street
   (`highway=living_street` at walking pace), 242.1 pedestrian zone (`highway=pedestrian`),
-  244.1 bicycle road (`bicycle_road=yes` or `cyclestreet=yes`, 30 unless tagged
-  otherwise), 274.1 30 zone and 274.1-20 20 zone (`zone:maxspeed=DE:30`,
-  `maxspeed=DE:zone30` …).
+  274.1 30 zone and 274.1-20 20 zone (`zone:maxspeed=DE:30`, `maxspeed=DE:zone30` …). A
+  bicycle road (`bicycle_road=yes`, `cyclestreet=yes` or `source:maxspeed=DE:bicycle_road`)
+  shows sign 244.1: grey without `maxspeed` (30 implied), in colour with `maxspeed=30`.
+  With another speed it shows the speed or zone sign with 244.1 next to it (e.g. 20, or
+  274.1-20 with `zone:maxspeed=DE:20`). A bicycle road is
+  closed to other vehicles by default; once they are let in (`vehicle`, `motor_vehicle`
+  or `motorcar` other than `no`), `maxspeed` counts as missing until it is tagged.
 - **Supplementary panels ("Zusatzzeichen")** under the sign, as on real German signs:
   the official panels for wet (1053-35), 7.5 t (1053-33), trucks (1010-51), buses
   (1010-57), cars with trailer (1010-59), school (1012-50), the snow symbol, and panels
@@ -42,7 +54,8 @@ What you see on the map:
   blue-grey = electronic signs without a usual maximum, red dashes on white = no limit for this vehicle. If access
   is restricted (`access`, `vehicle`, `motor_vehicle` or `motorcar` = `private`,
   `destination`, `no` …) the red dashes are on grey, because there a missing limit can be
-  correct.
+  correct. The same holds for `highway=service`: such ways are not part of the public road
+  network and rarely need a limit of their own.
 - **Directions.** One-way roads show only their driving direction, at full width. If
   `:forward` and `:backward` differ, the road is drawn as two halves: seen in drawing
   direction, the right half is `forward`, the left half `backward` (as in right-hand
@@ -55,14 +68,27 @@ What you see on the map:
   `oneway=-1` at the right edge.
 - **Ways that normally have no speed limit** (footways, paths, cycleways, steps, tracks,
   parking aisles, driveways …) become a thin white dashed line, unless they are tagged.
+- **Country defaults in grey.** Where a road has no `maxspeed`, the line stays “missing”,
+  but a grey sign shows the limit the law of the country sets for this kind of road, e.g.
+  50 in town or 100 elsewhere in Germany. Hovering over it says that it is a default, for
+  which country and road type. A tagged `maxspeed` always wins. The values come from the
+  OSM wiki page [Default speed limits](https://wiki.openstreetmap.org/wiki/Default_speed_limits).
+  Inside or outside a built-up area is never guessed (`lit`, sidewalks or
+  `highway=residential` are found outside towns too); it must be tagged:
+  [`zone:traffic`](https://wiki.openstreetmap.org/wiki/Key:zone:traffic)`=DE:urban` /
+  `DE:rural` (also `zone:traffic:left/right` if both are the same), `rural=yes/no`, or a
+  code such as `maxspeed:type=DE:rural`. Without it, roads in countries that make this
+  distinction get no grey sign; motorways do. The country is found with the borders iD
+  itself uses; states and provinces (USA, Canada, Australia, Belgium …) are not known
+  there, but the code in `zone:traffic` (e.g. `BE-VLG:rural`) names them.
 - A **legend** you can drag and fold.
 
 Vehicle types: car (`maxspeed`), truck (`maxspeed:hgv`), bus (`maxspeed:bus`, then
 `:coach`), trailer (`maxspeed:trailer`, then `:caravan`). Without a value of its own a
 vehicle uses plain `maxspeed`.
 
-Settings (toolbar icon): colouring, signs, extra signs and which kinds of them, legend,
-vehicle type, km/h or mph, German or English. Changes apply at once to all open tabs.
+Settings (toolbar icon): colouring, signs, extra signs and which kinds of them, country
+defaults, legend, vehicle type, km/h or mph, German or English. Changes apply at once to all open tabs.
 
 ### How it works
 
@@ -78,11 +104,37 @@ nothing is loaded or sent anywhere, and iD's data is not changed.
 | `_locales/` | Name and description in English and German. |
 | `dev/test.js` | Tests for the tag reading and line styles: `node dev/test.js`. Not needed to run the extension. |
 | `dev/signs/`, `dev/build-signs.js` | The official sign artwork and the script that writes it into `content.js` (`node dev/build-signs.js`). |
+| `dev/build-defaults.js` | Writes the country defaults into `content.js` and checks the wiki for changes (see below). |
 
 The German traffic signs come from [Wikimedia Commons](https://commons.wikimedia.org/)
 (files named “Zeichen …, StVO …” and “Zusatzzeichen …”, linked from the German Wikipedia
 article *Bildtafel der Verkehrszeichen in der Bundesrepublik Deutschland seit 2017*). As
 official works they are in the public domain (§ 5 UrhG). They were optimised with svgo.
+
+### Updating the country defaults (monthly)
+
+The wiki page *Default speed limits* is edited often. **Check it once a month:**
+
+```
+node dev/build-defaults.js --check
+```
+
+It compares the wiki revision stored in `content.js` with the current one. If the wiki
+is newer, generate the JSON with the parser of
+[osm-legal-default-speeds](https://github.com/westnordost/osm-legal-default-speeds)
+(`parser/main.py`, Python with `requests`, `beautifulsoup4`, `pycountry` and `lark`; the
+package `lark-parser` from its `requirements.txt` no longer runs on current Python) and
+write it into `content.js`:
+
+```
+python parser/main.py legal_default_speeds.json
+node dev/build-defaults.js legal_default_speeds.json
+node dev/test.js
+```
+
+The ready-made JSON in that repository is only regenerated now and then, so it can be
+older than the wiki. The road types and the order in which they are tried follow that
+project's reference implementation, without its fuzzy filters (guesses).
 
 ### Install
 
@@ -95,7 +147,11 @@ official works they are in the public domain (§ 5 UrhG). They were optimised wi
 
 The code is released under the [MIT License](LICENSE). The German traffic sign artwork
 (`dev/signs/` and the generated `SIGN_ART` block in `content.js`) is in the public domain
-and not covered by that license.
+and not covered by that license. The country defaults (the generated `defaultSpeedTable`
+block in `content.js`) come from the OSM wiki page
+[Default speed limits](https://wiki.openstreetmap.org/wiki/Default_speed_limits) by its
+contributors and are licensed
+[CC BY-SA 2.0](https://wiki.openstreetmap.org/wiki/Wiki_content_license).
 
 ---
 
@@ -115,13 +171,27 @@ Was auf der Karte erscheint:
 - **Tempo-Schilder** auf den Straßen: roter Ring für die Höchstgeschwindigkeit, blaues
   Quadrat für eine Richtgeschwindigkeit, 🚶 für `walk`, ein dunkles Schild mit ≈ für
   Wechselverkehrszeichen ohne üblichen Höchstwert (`maxspeed:variable` allein oder das
-  veraltete `maxspeed=signals`). Die Maus über einem Schild zeigt den Tag, aus dem der Wert stammt;
-  implizite Werte wie `DE:urban` sind gekennzeichnet.
+  veraltete `maxspeed=signals`). Die Maus über einem Schild zeigt den Tag, aus dem der Wert stammt.
+  **Farbig ist nur, was explizit getaggt ist** (eine Zahl, `none`, `walk`). Alles andere
+  ist grau: implizite Werte wie `maxspeed=DE:urban`, `source:maxspeed` oder `maxspeed:type`
+  ohne `maxspeed`, eine Fahrradstraße ohne Wert, die Richtgeschwindigkeit 130 bei
+  `maxspeed=none` ohne `maxspeed:advisory` außerhalb von Autobahnen und die Standardwerte
+  des Landes (siehe unten). Auf Autobahnen zeigt `maxspeed=none` die Richtgeschwindigkeit
+  130 farbig: In Deutschland gilt sie von sich aus, ist an der Grenze beschildert und wird
+  nicht je Straße getaggt.
+  Ein verkehrsberuhigter Bereich (`highway=living_street`) ist auch ohne `maxspeed`
+  farbig: Er bedeutet von sich aus Schrittgeschwindigkeit, und die hat die Farbe von „≤ 5“.
 - **Amtliche Verkehrszeichen**, wo ein Zeichen alles sagt: 325.1 verkehrsberuhigter
   Bereich (`highway=living_street` mit Schrittgeschwindigkeit), 242.1 Fußgängerzone
-  (`highway=pedestrian`), 244.1 Fahrradstraße (`bicycle_road=yes` oder `cyclestreet=yes`,
-  30 sofern nicht anders getaggt), 274.1 Tempo-30-Zone und 274.1-20 Tempo-20-Zone
-  (`zone:maxspeed=DE:30`, `maxspeed=DE:zone30` …).
+  (`highway=pedestrian`), 274.1 Tempo-30-Zone und 274.1-20 Tempo-20-Zone
+  (`zone:maxspeed=DE:30`, `maxspeed=DE:zone30` …). Eine Fahrradstraße (`bicycle_road=yes`,
+  `cyclestreet=yes` oder `source:maxspeed=DE:bicycle_road`) zeigt Zeichen 244.1: grau ohne
+  `maxspeed` (30 gilt implizit), farbig mit `maxspeed=30`. Bei anderem Tempo zeigt sie das
+  Tempo- bzw. Zonen-Zeichen und 244.1 daneben (z. B. 20, oder 274.1-20 mit
+  `zone:maxspeed=DE:20`).
+  Eine Fahrradstraße ist für andere Fahrzeuge standardmäßig gesperrt; sind sie freigegeben
+  (`vehicle`, `motor_vehicle` oder `motorcar` nicht `no`), gilt `maxspeed` als fehlend,
+  bis es getaggt ist.
 - **Zusatzzeichen** unter dem Schild wie in echt: die amtlichen Tafeln für Nässe
   (1053-35), 7,5 t (1053-33), Lkw (1010-51), Bus (1010-57), Pkw mit Anhänger (1010-59),
   Schule (1012-50), das Sinnbild Schnee- oder Eisglätte, und Tafeln im selben Stil mit
@@ -141,7 +211,9 @@ Was auf der Karte erscheint:
   Limit, weiße Striche auf Blaugrau = Wechselverkehrszeichen ohne üblichen Höchstwert, rote Striche auf Weiß = kein
   Limit für dieses Fahrzeug. Bei beschränkter Zufahrt (`access`, `vehicle`,
   `motor_vehicle` oder `motorcar` = `private`, `destination`, `no` …) liegen die roten
-  Striche auf Grau, weil dort ein fehlendes Limit stimmen kann.
+  Striche auf Grau, weil dort ein fehlendes Limit stimmen kann. Ebenso bei
+  `highway=service`: Solche Wege gehören nicht zum öffentlichen Straßennetz und brauchen
+  selten ein eigenes Limit.
 - **Richtungen.** Einbahnstraßen zeigen nur ihre Fahrtrichtung, in voller Breite.
   Unterscheiden sich `:forward` und `:backward`, wird die Straße als zwei Hälften
   gezeichnet: in Zeichenrichtung gesehen rechts `forward`, links `backward` (wie bei
@@ -156,6 +228,21 @@ Was auf der Karte erscheint:
 - **Wege, die normalerweise kein Tempolimit haben** (Fußwege, Pfade, Radwege, Treppen,
   Wirtschaftswege, Parkplatzgassen, Grundstückszufahrten …), werden zur feinen weißen
   Strichlinie, sofern sie kein Limit tragen.
+- **Standardwerte des Landes in Grau.** Fehlt `maxspeed`, bleibt die Linie „fehlt“, aber
+  ein graues Schild zeigt, was das Gesetz des Landes für diese Straßenart vorsieht, in
+  Deutschland z. B. 50 innerorts und 100 außerorts. Die Maus darüber zeigt, dass es ein
+  Standardwert ist, für welches Land und welche Straßenart. Ein getaggtes `maxspeed` geht
+  immer vor. Die Werte stammen von der OSM-Wiki-Seite
+  [Default speed limits](https://wiki.openstreetmap.org/wiki/Default_speed_limits).
+  Innerorts oder außerorts wird nie geschätzt (`lit`, Gehwege oder `highway=residential`
+  gibt es auch außerhalb von Ortschaften); es muss getaggt sein:
+  [`zone:traffic`](https://wiki.openstreetmap.org/wiki/Key:zone:traffic)`=DE:urban` /
+  `DE:rural` (auch `zone:traffic:left/right`, wenn beide gleich sind), `rural=yes/no` oder
+  ein Code wie `maxspeed:type=DE:rural`. Ohne das gibt es in Ländern mit dieser
+  Unterscheidung kein graues Schild; Autobahnen bekommen eins. Das Land ergibt sich aus
+  den Grenzen, die iD selbst verwendet; Bundesstaaten und Provinzen (USA, Kanada,
+  Australien, Belgien …) kennt iD dabei nicht, der Code in `zone:traffic` (z. B.
+  `BE-VLG:rural`) nennt sie aber.
 - Eine **Legende**, die sich verschieben und einklappen lässt.
 
 Fahrzeugtypen: PKW (`maxspeed`), LKW (`maxspeed:hgv`), Bus (`maxspeed:bus`, dann
@@ -163,7 +250,7 @@ Fahrzeugtypen: PKW (`maxspeed`), LKW (`maxspeed:hgv`), Bus (`maxspeed:bus`, dann
 Fahrzeug das allgemeine `maxspeed`.
 
 Einstellungen (Erweiterungs-Icon): Färbung, Schilder, Zusatzschilder und welche Arten
-davon, Legende, Fahrzeugtyp, km/h oder mph, Deutsch oder Englisch. Änderungen gelten sofort
+davon, Standardwerte des Landes, Legende, Fahrzeugtyp, km/h oder mph, Deutsch oder Englisch. Änderungen gelten sofort
 in allen offenen Tabs.
 
 ### Funktionsweise
@@ -172,6 +259,12 @@ iD hängt die Tags jedes Wegs an dessen SVG-Linie auf der Karte. Die Erweiterung
 dort; es wird nichts geladen oder verschickt, und iDs Daten bleiben unverändert.
 
 Die Dateien und ihre Aufgaben stehen in der Tabelle im englischen Teil oben.
+
+### Standardwerte aktualisieren (monatlich)
+
+Die Wiki-Seite *Default speed limits* wird oft geändert. **Einmal im Monat prüfen** mit
+`node dev/build-defaults.js --check`; ist das Wiki neuer, wie im englischen Teil unter
+*Updating the country defaults* beschrieben das JSON neu erzeugen und einspielen.
 
 ### Installation
 
@@ -184,3 +277,8 @@ Die Dateien und ihre Aufgaben stehen in der Tabelle im englischen Teil oben.
 
 Der Code steht unter der [MIT-Lizenz](LICENSE). Die Verkehrszeichen (`dev/signs/` und der
 erzeugte `SIGN_ART`-Block in `content.js`) sind gemeinfrei und fallen nicht unter diese Lizenz.
+Die Standardwerte der Länder (der erzeugte Block `defaultSpeedTable` in `content.js`)
+stammen von der OSM-Wiki-Seite
+[Default speed limits](https://wiki.openstreetmap.org/wiki/Default_speed_limits) und ihren
+Autoren und stehen unter
+[CC BY-SA 2.0](https://wiki.openstreetmap.org/wiki/Wiki_content_license).
