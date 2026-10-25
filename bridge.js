@@ -18,6 +18,7 @@
         noSpeed: OMC_NO_SPEED,
         extraTypes: OMC_EXTRA_TYPES,
         vehicles: OMC_VEHICLES,
+        hgvClasses: OMC_HGV_CLASSES,
       }, location.origin);
     });
   };

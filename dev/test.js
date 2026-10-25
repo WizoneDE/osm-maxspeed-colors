@@ -32,8 +32,21 @@ eq('oneway=-1', W({ oneway: '-1', maxspeed: '50' }), ['-', 'limit 50']);
 eq('hgv eigener Wert', W({ maxspeed: '100', 'maxspeed:hgv': '80' }, ['hgv']), ['limit 80', 'limit 80']);
 eq('hgv ohne eigenen Wert → maxspeed', W({ maxspeed: '100' }, ['hgv']), ['limit 100', 'limit 100']);
 eq('hgv:forward', W({ maxspeed: '100', 'maxspeed:hgv': '80', 'maxspeed:hgv:forward': '60' }, ['hgv']), ['limit 60', 'limit 80']);
-eq('bus über coach', W({ maxspeed: '100', 'maxspeed:coach': '80' }, ['bus', 'coach']), ['limit 80', 'limit 80']);
+// Bus (Linien-/Stadtbus) und Reisebus getrennt (2026-10-25); Reisebus ohne eigenen Wert → maxspeed:bus
+eq('Bus ignoriert coach', W({ maxspeed: '100', 'maxspeed:coach': '80' }, ['bus']), ['limit 100', 'limit 100']);
+eq('Reisebus: coach vor bus', W({ maxspeed: '120', 'maxspeed:bus': '80', 'maxspeed:coach': '100' }, ['coach', 'bus']), ['limit 100', 'limit 100']);
+eq('Reisebus ohne coach → bus', W({ maxspeed: '120', 'maxspeed:bus': '80' }, ['coach', 'bus']), ['limit 80', 'limit 80']);
 eq('PKW ignoriert hgv', W({ maxspeed: '100', 'maxspeed:hgv': '80' }), ['limit 100', 'limit 100']);
+// Subtypen (2026-10-25): Bedingung, die genau das Fahrzeug nennt, ist dessen eigener Wert
+const CAR = ['motorcar'], TRAILER = ['trailer', 'caravan', 'motorcar'];
+eq('PKW: maxspeed:motorcar', W({ maxspeed: '100', 'maxspeed:motorcar': '80' }, CAR), ['limit 80', 'limit 80']);
+eq('Anhänger: motorcar:conditional @ trailer', W({ maxspeed: '100', 'maxspeed:motorcar:conditional': '80 @ trailer' }, TRAILER), ['limit 80', 'limit 80']);
+eq('Anhänger: maxspeed:conditional @ (trailer) vor maxspeed:motorcar', W({ maxspeed: '120', 'maxspeed:motorcar': '100', 'maxspeed:conditional': '80 @ (trailer); 60 @ wet' }, TRAILER), ['limit 80 60wet', 'limit 80 60wet']);
+eq('Anhänger: maxspeed:trailer vor Bedingung', W({ 'maxspeed:trailer': '60', 'maxspeed:conditional': '80 @ trailer' }, TRAILER), ['limit 60', 'limit 60']);
+eq('PKW: @ trailer bleibt Zusatzschild', W({ maxspeed: '100', 'maxspeed:motorcar:conditional': '80 @ trailer' }, CAR), ['limit 100 80vehicle', 'limit 100 80vehicle']);
+eq('LKW: @ (hgv) wird Hauptwert, Gewicht bleibt Zusatz', W({ maxspeed: '100', 'maxspeed:conditional': '60 @ (hgv)', 'maxspeed:hgv:conditional': '50 @ (weight>7.5)' }, ['hgv']), ['limit 60 50vehicle', 'limit 60 50vehicle']);
+eq('LKW: allgemeine und eigene Bedingungen zusammen', W({ maxspeed: '100', 'maxspeed:hgv': '80', 'maxspeed:hgv:conditional': '60 @ (weight>7.5)', 'maxspeed:conditional': '70 @ wet' }, ['hgv']), ['limit 80 60vehicle,70wet', 'limit 80 60vehicle,70wet']);
+eq('Zusatz Anhänger aus Bedingung', api.mainPanels(api.waySpeed({ highway: 'primary', maxspeed: '100', 'maxspeed:conditional': '80 @ (trailer)' }, TRAILER).forward).map((p) => p.art), ['1010-59']);
 // Bedingungen
 eq('conditional wet + Zeit', W({ maxspeed: '120', 'maxspeed:conditional': '80 @ wet; 60 @ (Mo-Fr 07:00-17:00; Sa 08:00-12:00)' }), ['limit 120 80wet,60time', 'limit 120 80wet,60time']);
 eq('conditional sunset', W({ maxspeed: '100', 'maxspeed:conditional': '70 @ (sunset-sunrise)' }), ['limit 100 70daytime', 'limit 100 70daytime']);
@@ -146,7 +159,7 @@ api.setDisplay({ unit: 'kmh', lang: 'de' });
 eq('Bandtext', [api.bandLabel(api.colorBands()[0]), api.bandLabel(api.colorBands()[2]), api.bandLabel(api.colorBands()[12])], ['≤ 5', '30–39', '≥ 130']);
 // Einstellungen aus der Nachricht
 eq('Einstellungen kaputt', api.checkSettings({ enabled: 'ja', vehicle: '<b>', unit: 'x', hiddenExtras: [1, 'wet'] }),
-  { enabled: true, signs: true, extras: true, legend: true, defaults: true, hiddenExtras: ['wet'], vehicle: 'car', unit: 'kmh', lang: 'de' });
+  { enabled: true, signs: true, extras: true, legend: true, defaults: true, hiddenExtras: ['wet'], vehicle: 'car', hgvClass: '', unit: 'kmh', lang: 'de' });
 api.setVehicles([['car', [], '🚗', 'PKW', 'Car'], ['hgv', ['hgv'], '🚛', 'LKW', 'Truck'], ['bad', ['x y'], '', '', ''], 'quatsch']);
 eq('Fahrzeuge geprüft', [api.suffixesFor('hgv'), api.suffixesFor('bad'), api.suffixesFor('car')], [['hgv'], [], []]);
 api.setVehicles('quatsch');
@@ -186,7 +199,8 @@ eq('DE zweibahnig außerorts → Richt 130', D({ highway: 'trunk', oneway: 'yes'
 eq('DE LKW außerorts', D({ highway: 'primary', ...RURAL }, ['hgv']), 'missing 80 rural');
 eq('DE LKW innerorts: 80 gilt nicht über 50', D({ highway: 'residential', ...URBAN }, ['hgv']), 'missing 50 urban');
 eq('DE Anhänger aus (trailer)', D({ highway: 'primary', ...RURAL }, ['trailer', 'caravan']), 'missing 80 rural');
-eq('DE Bus', D({ highway: 'primary', ...RURAL }, ['bus', 'coach']), 'missing 80 rural');
+eq('DE Bus', D({ highway: 'primary', ...RURAL }, ['bus']), 'missing 80 rural');
+eq('DE Autobahn: Bus 80, Reisebus 100', [D({ highway: 'motorway', oneway: 'yes' }, ['bus']), D({ highway: 'motorway', oneway: 'yes' }, ['coach', 'bus'])], ['missing 80 motorway', 'missing 100 motorway']);
 eq('getaggt geht vor', D({ highway: 'primary', maxspeed: '70', ...RURAL }), 'limit');
 eq('Standardwerte aus', D({ highway: 'primary', ...RURAL }, [], null), 'missing');
 eq('Land unbekannt, zone:traffic nennt es', [D({ highway: 'primary', ...RURAL }, [], ''), D({ highway: 'primary' }, [], '')], ['missing 100 rural', 'missing']);
@@ -249,8 +263,45 @@ eq('Linie bleibt „fehlt“', JSON.stringify(api.lineStyleFor({ highway: 'prima
 // Zusatzbedingungen der Standardwerte: PKW ohne Gewichts-/Lkw-Bedingungen, keine Dopplung mit dem Hauptwert
 // (K 154, 2026-10-25: PKW zeigte 100 + 80 über 3,5 t + 60 über 7,5 t)
 const EXTRAS = (veh) => { const d = api.waySpeed({ highway: 'tertiary', lanes: '2', ref: 'K 154', ...RURAL }, veh, 'DE').forward.fallback.info; return [d.kmh, ...d.extras.map((e) => `${e.kmh}@${e.raw}`)].join(' '); };
-eq('Standardwert-Bedingungen je Fahrzeug', [[], ['hgv'], ['bus', 'coach'], ['trailer', 'caravan']].map(EXTRAS),
+eq('Standardwert-Bedingungen je Fahrzeug', [[], ['hgv'], ['bus'], ['trailer', 'caravan']].map(EXTRAS),
   ['100', '80 60@weightrating>7.5', '80 60@weightrating>7.5 60@trailer', '80 60@weightrating>7.5']);
+// Andere Fahrzeuge: maxspeed für alle über dem eigenen Standardwert gilt als nicht gesetzt (2026-10-25)
+const V = (tags, veh) => { const d = api.waySpeed(tags, veh, 'DE').forward; return [d.status, Math.round((d.fallback ? d.fallback.info : d).kmh), api.isGreySign(d) ? 'grau' : 'farbig'].join(' '); };
+eq('LKW: maxspeed über/unter Standardwert', [{ maxspeed: '100' }, { maxspeed: '70' }, { maxspeed: '80' }, { maxspeed: '100', 'maxspeed:hgv': '90' }, { maxspeed: '100' }].map((t, i) =>
+  V({ highway: 'primary', ...RURAL, ...t }, i === 4 ? [] : ['hgv'])), ['missing 80 grau', 'limit 70 farbig', 'limit 80 farbig', 'limit 90 farbig', 'limit 100 farbig']);
+eq('LKW Autobahn: none → Standard 80', V({ highway: 'motorway', oneway: 'yes', maxspeed: 'none' }, ['hgv']), 'missing 80 grau');
+eq('LKW innerorts: 70 gilt (kein eigener Standardwert)', V({ highway: 'primary', ...URBAN, maxspeed: '70' }, ['hgv']), 'limit 70 farbig');
+eq('LKW ohne innerorts/außerorts: getaggt bleibt', V({ highway: 'primary', maxspeed: '100' }, ['hgv']), 'limit 100 farbig');
+eq('Reisebus Autobahn: maxspeed=120 → 100, maxspeed:bus=80 bleibt', [V({ highway: 'motorway', oneway: 'yes', maxspeed: '120' }, ['coach', 'bus']), V({ highway: 'motorway', oneway: 'yes', maxspeed: '120', 'maxspeed:bus': '80' }, ['coach', 'bus'])],
+  ['missing 100 grau', 'limit 80 farbig']);
+eq('Bus und Anhänger über Standardwert', [V({ highway: 'primary', ...RURAL, maxspeed: '100' }, ['bus']), V({ highway: 'primary', ...RURAL, 'maxspeed:motorcar': '100' }, ['trailer', 'caravan', 'motorcar'])],
+  ['missing 80 grau', 'missing 80 grau']);
+eq('über Standardwert: Tooltip', api.defaultTooltip(api.waySpeed({ highway: 'primary', ...RURAL, maxspeed: '100' }, ['hgv'], 'DE').forward.fallback).split('\n')[1],
+  'Standardwert des Landes für dieses Fahrzeug – maxspeed=100 liegt darüber und gilt nicht');
+eq('über Standardwert: getaggte Bedingung darunter bleibt', api.waySpeed({ highway: 'primary', ...RURAL, maxspeed: '100', 'maxspeed:conditional': '60 @ wet' }, ['hgv'], 'DE').forward.fallback.info.extras.map((e) => e.kmh + e.kind),
+  ['60wet', '60vehicle']);
+// LKW-Klassen nach zulässiger Gesamtmasse (2026-10-25): Bedingung für die ganze Klasse → Hauptwert,
+// für keinen → entfällt, für einen Teil → Zusatzschild
+const CLASSES = { C1: { min: 3.5, max: 7.5 }, C: { min: 7.5, max: 18 }, CE: { min: 18, max: 44 }, N2: { min: 3.5, max: 12 }, N3: { min: 12, max: Infinity } };
+const M = (cond, cls) => api.weightConditionMet(cond, CLASSES[cls], ['hgv']);
+eq('Gewichtsbedingung je Klasse', ['C1', 'C', 'CE', 'N2', 'N3'].map((c) => M('weightrating>7.5', c)), [false, true, true, null, true]);
+eq('Gewichtsbedingung Operatoren', [M('weight<=7.5', 'C1'), M('weight<7.5', 'C1'), M('weight>=12', 'N3'), M('maxweightrating>12', 'C'), M('weight>12 AND trailer', 'N3'), M('hgv AND weight>7.5', 'C'), M('wet', 'C')],
+  [true, null, true, null, null, true, null]);
+const K = (tags, cls) => { const d = api.waySpeed({ highway: 'primary', ...tags }, ['hgv'], 'DE', CLASSES[cls] || null).forward; const i = d.fallback ? d.fallback.info : d;
+  return [d.status, Math.round(i.kmh), ...i.extras.map((e) => `${e.kmh}@${e.raw}`), api.isGreySign(d) ? 'grau' : 'farbig'].join(' '); };
+eq('DE außerorts Standardwert je Klasse', ['', 'C1', 'C', 'CE', 'N2', 'N3'].map((c) => K(RURAL, c)),
+  ['missing 80 60@weightrating>7.5 grau', 'missing 80 grau', 'missing 60 grau', 'missing 60 grau', 'missing 80 60@weightrating>7.5 grau', 'missing 60 grau']);
+eq('getaggt: hgv:conditional je Klasse', ['', 'C1', 'C'].map((c) => K({ ...RURAL, 'maxspeed:hgv': '80', 'maxspeed:hgv:conditional': '60 @ (weight>7.5)' }, c)),
+  ['limit 80 60@weight>7.5 farbig', 'limit 80 farbig', 'limit 60 farbig']);
+eq('Klasse C: maxspeed=70 über eigenem Standardwert 60', K({ ...RURAL, maxspeed: '70' }, 'C'), 'missing 60 grau');
+eq('Klasse C1: maxspeed=70 gilt', K({ ...RURAL, maxspeed: '70' }, 'C1'), 'limit 70 farbig');
+// L 318 (2026-10-25): maxspeed:forward=70 getaggt, N2 – „60 über 7,5 t“ gilt weiter, grau als Standardwert
+const L318 = { highway: 'secondary', lanes: '2', 'maxspeed:backward': '100', 'maxspeed:forward': '70', 'source:maxspeed:backward': 'DE:rural', 'source:maxspeed:forward': 'sign', 'zone:traffic': 'DE:rural' };
+const EX = (veh, cls) => { const d = api.waySpeed(L318, veh, 'DE', CLASSES[cls] || null).forward; return [d.status, d.kmh, ...d.extras.map((e) => `${e.kmh}${e.fromDefault ? 'grau' : ''}`)].join(' '); };
+eq('getaggter Wert + Standard-Bedingung darunter', [EX(['hgv']), EX(['hgv'], 'N2'), EX(['hgv'], 'C1'), EX(['motorcar'])], ['limit 70 60grau', 'limit 70 60grau', 'limit 70', 'limit 70']);
+api.setHgvClasses([['C', 7.5, 18, 'DE', 'C de', 'C en'], ['N3', 12, null, 'EU', 'N3 de', 'N3 en'], ['bad', '1', 2]]);
+eq('Klasse aus Einstellungen', [api.weightOf({ vehicle: 'hgv', hgvClass: 'C' }), api.weightOf({ vehicle: 'hgv', hgvClass: 'N3' }), api.weightOf({ vehicle: 'bus', hgvClass: 'C' }), api.weightOf({ vehicle: 'hgv', hgvClass: '' })],
+  [{ min: 7.5, max: 18 }, { min: 12, max: null }, null, null]);
 eq('getaggte Bedingung bleibt beim PKW', api.waySpeed({ highway: 'tertiary', maxspeed: '100', 'maxspeed:conditional': '60 @ (weight>7.5)' }, [], 'DE').forward.extras.length, 1);
 }
 

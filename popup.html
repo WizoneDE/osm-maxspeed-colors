@@ -19,6 +19,7 @@
   .row label { flex: 1; cursor: pointer; }
   .row.sub label { padding-left: 14px; color: var(--muted); }
   .row.disabled, .types.disabled { opacity: .45; pointer-events: none; }
+  .row[hidden] { display: none; }
 
   /* Kinds of extra signs (fold-out list with checkboxes) */
   .types { margin: 0 0 4px 14px; }
@@ -93,6 +94,10 @@
   <div class="row">
     <label for="vehicle" data-i18n="vehicle"></label>
     <select id="vehicle"></select>
+  </div>
+  <div class="row sub" id="hgvClassRow">
+    <label for="hgvClass" data-i18n="hgvClass"></label>
+    <select id="hgvClass"></select>
   </div>
   <div class="row">
     <span data-i18n="unit"></span>

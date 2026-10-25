@@ -83,9 +83,21 @@ What you see on the map:
   there, but the code in `zone:traffic` (e.g. `BE-VLG:rural`) names them.
 - A **legend** you can drag and fold.
 
-Vehicle types: car (`maxspeed`), truck (`maxspeed:hgv`), bus (`maxspeed:bus`, then
-`:coach`), trailer (`maxspeed:trailer`, then `:caravan`). Without a value of its own a
-vehicle uses plain `maxspeed`.
+Vehicle types: car (`maxspeed:motorcar`, then `maxspeed`), truck (`maxspeed:hgv`), bus /
+city bus (`maxspeed:bus`), coach (`maxspeed:coach`, then `maxspeed:bus`; in Germany e.g.
+100 instead of 80 on motorways), trailer (`maxspeed:trailer`, then `:caravan`, then
+`maxspeed:motorcar`). A conditional limit that names exactly the vehicle
+(`maxspeed:conditional=60 @ (hgv)`, `maxspeed:motorcar:conditional=80 @ trailer`) is its
+own value; other conditions (`@ (weight>7.5)`) stay extra signs.
+
+For trucks a class by permissible maximum mass can be chosen (default: no filter):
+German licence classes C1 (3.5–7.5 t), C (7.5–18 t), CE (18–44 t) or EU categories N2
+(3.5–12 t), N3 (over 12 t). A weight condition met by the whole class becomes the
+main value (class C: `maxspeed:hgv:conditional=60 @ (weight>7.5)` → 60), one met by
+none of it is left out (C1), one met by part of it stays an extra sign (N2). Other
+conditions such as `trailer` always stay extra signs. Without a value of its own a vehicle uses plain `maxspeed`, unless that is above
+the vehicle's own country default (e.g. trucks 80 on German rural roads): then
+`maxspeed` does not apply to it, and the default is shown in grey.
 
 Settings (toolbar icon): colouring, signs, extra signs and which kinds of them, country
 defaults, legend, vehicle type, km/h or mph, German or English. Changes apply at once to all open tabs.
@@ -245,9 +257,22 @@ Was auf der Karte erscheint:
   `BE-VLG:rural`) nennt sie aber.
 - Eine **Legende**, die sich verschieben und einklappen lässt.
 
-Fahrzeugtypen: PKW (`maxspeed`), LKW (`maxspeed:hgv`), Bus (`maxspeed:bus`, dann
-`:coach`), Anhänger (`maxspeed:trailer`, dann `:caravan`). Ohne eigenen Wert gilt für ein
-Fahrzeug das allgemeine `maxspeed`.
+Fahrzeugtypen: PKW (`maxspeed:motorcar`, dann `maxspeed`), LKW (`maxspeed:hgv`), Bus /
+Linienbus / Stadtbus (`maxspeed:bus`), Reisebus (`maxspeed:coach`, dann `maxspeed:bus`;
+in Deutschland z. B. 100 statt 80 auf Autobahnen), Anhänger (`maxspeed:trailer`, dann
+`:caravan`, dann `maxspeed:motorcar`). Ein bedingtes Limit, das genau das Fahrzeug nennt
+(`maxspeed:conditional=60 @ (hgv)`, `maxspeed:motorcar:conditional=80 @ trailer`), ist
+dessen eigener Wert; andere Bedingungen (`@ (weight>7.5)`) bleiben Zusatzschilder.
+
+Für LKW lässt sich eine Klasse nach zulässiger Gesamtmasse wählen (Standard: keine
+Filterung): DE-Führerscheinklassen C1 (3,5–7,5 t), C (7,5–18 t), CE (18–44 t) oder
+EU-Fahrzeugklassen N2 (3,5–12 t), N3 (über 12 t). Eine Gewichtsbedingung, die die ganze
+Klasse erfüllt, wird zum Hauptwert (Klasse C: `maxspeed:hgv:conditional=60 @ (weight>7.5)`
+→ 60), eine, die keiner erfüllt, entfällt (C1), eine, die nur ein Teil erfüllt, bleibt
+Zusatzschild (N2). Andere Bedingungen wie `trailer` bleiben immer Zusatzschilder. Ohne eigenen Wert gilt für ein Fahrzeug das allgemeine
+`maxspeed`, außer es liegt über dem eigenen Standardwert des Fahrzeugs (z. B. LKW 80
+außerorts in Deutschland): Dann gilt `maxspeed` für dieses Fahrzeug nicht, und der
+Standardwert erscheint grau.
 
 Einstellungen (Erweiterungs-Icon): Färbung, Schilder, Zusatzschilder und welche Arten
 davon, Standardwerte des Landes, Legende, Fahrzeugtyp, km/h oder mph, Deutsch oder Englisch. Änderungen gelten sofort

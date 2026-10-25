@@ -47,7 +47,11 @@
    * @property {string} kind   Key from OMC_EXTRA_TYPES, used by the popup filter.
    */
 
-  /** @typedef {Condition & { kmh: number }} ExtraLimit  A conditional limit shown as a small extra sign. */
+  /**
+   * A conditional limit shown as a small extra sign. `fromDefault`: not tagged but the
+   * country's default for this vehicle, shown in grey next to a tagged value.
+   * @typedef {Condition & { kmh: number, fromDefault?: boolean }} ExtraLimit
+   */
 
   // ===========================================================================
   // Language and unit
@@ -94,6 +98,7 @@
       defaults: isOn('defaults'),
       hiddenExtras: Array.isArray(s.hiddenExtras) ? s.hiddenExtras.filter((k) => typeof k === 'string').slice(0, 50) : [],
       vehicle: typeof s.vehicle === 'string' && VEHICLE_KEY.test(s.vehicle) ? s.vehicle : 'car',
+      hgvClass: typeof s.hgvClass === 'string' && /^[A-Z0-9]{1,4}$/.test(s.hgvClass) ? s.hgvClass : '',
       unit: s.unit === 'mph' ? 'mph' : 'kmh',
       lang: s.lang === 'en' ? 'en' : 'de',
     };
@@ -137,7 +142,7 @@
    * @typedef {[string, string[], string, string, string]} Vehicle
    */
   /** @type {Vehicle[]} */
-  let vehicles = [['car', [], '🚗', 'PKW', 'Car']];
+  let vehicles = [['car', ['motorcar'], '🚗', 'PKW (motorcar)', 'Car (motorcar)']];
 
   /** Accepts the vehicle list; entries of the wrong shape are dropped. @param {unknown} list */
   function setVehicles(list) {
@@ -157,6 +162,34 @@
 
   /** OSM suffixes for a vehicle key, e.g. "hgv" → ["hgv"]; [] (plain maxspeed) if unknown. @param {string} key */
   const suffixesFor = (key) => vehicles.find(([k]) => k === key)?.[1] ?? [];
+
+  /**
+   * Truck classes by permissible maximum mass: [key, more than … t, at most … t
+   * (null = open), German, English]. From OMC_HGV_CLASSES in settings.js.
+   * @typedef {[string, number, number | null, string, string]} HgvClass
+   */
+  /** @type {HgvClass[]} */
+  let hgvClasses = [];
+
+  /** Accepts the truck classes; entries of the wrong shape are dropped. @param {unknown} list */
+  function setHgvClasses(list) {
+    if (!Array.isArray(list)) return;
+    hgvClasses = list
+      .filter((e) => Array.isArray(e) && e.length >= 6 && typeof e[0] === 'string' && typeof e[1] === 'number'
+        && (typeof e[2] === 'number' || e[2] === null) && typeof e[4] === 'string' && typeof e[5] === 'string')
+      .slice(0, 20)
+      .map((e) => [String(e[0]).slice(0, 8), e[1], e[2], String(e[4]).slice(0, 60), String(e[5]).slice(0, 60)]);
+  }
+
+  /**
+   * Weight range of the chosen truck class, null without one (or for other vehicles).
+   * @param {Settings} s
+   * @returns {WeightRange | null}
+   */
+  function weightOf(s) {
+    const c = s.vehicle === 'hgv' ? hgvClasses.find(([key]) => key === s.hgvClass) : undefined;
+    return c ? { min: c[1], max: c[2] ?? Infinity } : null;
+  }
 
   const TEXT = {
     de: {
@@ -178,6 +211,7 @@
       implicit: 'implizit',
       walk: 'Schrittgeschwindigkeit',
       defaultValue: 'Standardwert des Landes – maxspeed ist nicht getaggt',
+      aboveDefault: (/** @type {string} */ tag) => `Standardwert des Landes für dieses Fahrzeug – ${tag} liegt darüber und gilt nicht`,
       defaultRoad: (/** @type {string} */ country, /** @type {string} */ road) =>
         `${country}, ${road ? `Straßenart „${road}“` : 'übrige Straßen'}`,
       defaultSource: 'Quelle: OSM-Wiki „Default speed limits“',
@@ -194,6 +228,7 @@
       hint: 'Maus über ein Schild zeigt Tag und Bedingung.',
       legendTitle: 'Speed Restriction – Legende',
       vehicleHeading: 'Fahrzeug',
+      hgvClassHeading: 'Klasse',
       unitHeading: 'Einheit',
       speedsHeading: 'Geschwindigkeiten',
       distinctionsHeading: 'Abgrenzungen',
@@ -218,6 +253,7 @@
       implicit: 'implicit',
       walk: 'walking pace',
       defaultValue: 'Default of the country – maxspeed is not tagged',
+      aboveDefault: (/** @type {string} */ tag) => `Default of the country for this vehicle – ${tag} is above it and does not apply`,
       defaultRoad: (/** @type {string} */ country, /** @type {string} */ road) =>
         `${country}, ${road ? `road type “${road}”` : 'other roads'}`,
       defaultSource: 'Source: OSM wiki “Default speed limits”',
@@ -234,6 +270,7 @@
       hint: 'Hover over a sign to see its tag and condition.',
       legendTitle: 'Speed Restriction – Legend',
       vehicleHeading: 'Vehicle',
+      hgvClassHeading: 'Class',
       unitHeading: 'Unit',
       speedsHeading: 'Speeds',
       distinctionsHeading: 'Distinctions',
@@ -341,7 +378,7 @@
     if (/sunrise|sunset|dawn|dusk/.test(c)) return 'daytime';
     if (/\d{1,2}:\d{2}|\b(mo|tu|we|th|fr|sa|su)\b/.test(c)) return 'time';
     if (/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b|winter|summer|spring|autumn/.test(c)) return 'season';
-    if (/weight|length|width|height|axle|trailer|caravan|hazmat|occupants|wheels|hgv|goods|bus/.test(c)) return 'vehicle';
+    if (/weight|length|width|height|axle|trailer|caravan|hazmat|occupants|articulated|wheels|hgv|goods|bus/.test(c)) return 'vehicle';
     return 'other';
   }
 
@@ -429,6 +466,9 @@
    *                                  none. At 30 the main sign is 244.1; at another speed
    *                                  244.1 is drawn next to the speed or zone sign.
    * @property {string} source         The tag value it came from, for the tooltip.
+   * @property {string} vehicle        Suffix of the vehicle the value is tagged for, e.g. "hgv"
+   *                                  for maxspeed:hgv or "maxspeed:conditional=80 @ (hgv)";
+   *                                  "" if it applies to every vehicle.
    * @property {Condition | null} condition  Set when the main value itself is conditional
    *                                  (only maxspeed:conditional is tagged).
    * @property {ExtraLimit[]} extras   Conditional limits (maxspeed:…:conditional).
@@ -445,6 +485,8 @@
    * @property {string} roadType      Road type from the table, "" for other roads.
    * @property {string} [openTo]      Not from the table but a bicycle road opened to other
    *                                  vehicles without maxspeed: the access tag, e.g. "vehicle=destination".
+   * @property {string} [above]       A value for every vehicle is tagged but above this
+   *                                  vehicle's own default, so it counts as missing: the tag, e.g. "maxspeed=100".
    */
 
   /** @typedef {{ kmh: number, advisory: boolean, sign: string }} LaneSpeed */
@@ -530,25 +572,78 @@
     return { kmh: value.kmh, advisory: false, sign: '' };
   }
 
+  /** Permissible maximum mass of a truck class in t: more than min, at most max. @typedef {{ min: number, max: number }} WeightRange */
+
+  /**
+   * Whether every vehicle of a weight class meets a condition (true), none does
+   * (false), or it depends on the vehicle (null). Weight terms (weight, weightrating,
+   * maxweightrating: the class is a permissible maximum mass, which signs such as
+   * "7,5 t" mean) are judged; the vehicle's own name ("hgv") is met; anything else
+   * (trailer, times, wet …) stays open. Terms joined by AND must all hold.
+   * @param {string} condition  e.g. "weightrating>7.5" or "trailer AND weight>12".
+   * @param {WeightRange} weight
+   * @param {string[]} vehicleSuffixes
+   * @returns {boolean | null}
+   */
+  function weightConditionMet(condition, weight, vehicleSuffixes) {
+    /** @type {boolean | null} */
+    let result = true;
+    for (const term of condition.split(/\s+AND\s+/i)) {
+      const t = term.trim().toLowerCase();
+      if (vehicleSuffixes.includes(t)) continue;
+      const m = /^(?:max)?weight(?:rating)?\s*(>=|<=|>|<)\s*([\d.]+)\s*(t|lbs?|st)?$/.exec(t);
+      if (!m) { result = null; continue; }
+      const n = Number(m[2]) * (m[3]?.startsWith('lb') ? 0.000453592 : m[3] === 'st' ? 0.907185 : 1);
+      const op = m[1];
+      // The class is the range (min, max]: "more than min, at most max".
+      const all = op === '>' || op === '>=' ? weight.min >= n : op === '<' ? weight.max < n : weight.max <= n;
+      const none = op === '>' ? weight.max <= n : op === '>=' ? weight.max < n : weight.min >= n;
+      if (none) return false;
+      if (!all) result = null;
+    }
+    return result;
+  }
+
   /**
    * What applies to one way for one vehicle type in one direction.
    * @param {Tags} tags
    * @param {string[]} vehicleSuffixes
    * @param {Direction} direction
    * @param {number} oneway  See onewayOf.
+   * @param {WeightRange | null} [weight]  Truck class: weight conditions met by the whole
+   *                                  class count as its value, those met by none are left out.
    * @returns {DirectionSpeed | null}  null = not a road, leave it alone.
    */
-  function directionSpeed(tags, vehicleSuffixes, direction, oneway) {
+  function directionSpeed(tags, vehicleSuffixes, direction, oneway, weight = null) {
     /** @type {DirectionSpeed} */
-    const base = { status: 'missing', kmh: 0, advisory: false, implicit: false, unlimited: false, variable: false, variableReasons: [], sign: '', symbol: '', source: '', condition: null, extras: [], lanes: null, fallback: null, bicycleRoad: '' };
+    const base = { status: 'missing', kmh: 0, advisory: false, implicit: false, unlimited: false, variable: false, variableReasons: [], sign: '', symbol: '', source: '', vehicle: '', condition: null, extras: [], lanes: null, fallback: null, bicycleRoad: '' };
     const hasAnySpeedTag = Object.keys(tags).some((k) => k === 'maxspeed' || k.startsWith('maxspeed:') || k === 'zone:maxspeed');
+    /** Vehicle suffix of a key such as maxspeed:hgv:forward, "" for plain maxspeed…. @param {string} key */
+    const vehicleOf = (key) => vehicleSuffixes.find((v) => key === `maxspeed:${v}` || key.startsWith(`maxspeed:${v}:`)) || '';
 
     const advisoryTag = firstTag(tags, [`maxspeed:advisory:${direction}`, 'maxspeed:advisory']);
     const advisory = advisoryTag ? parseSpeed(advisoryTag.value) : null;
     const advisoryKmh = advisory && advisory.kind === 'limit' ? advisory.kmh : 0;
 
-    const extrasTag = firstTag(tags, keysFor(vehicleSuffixes, direction, ':conditional'));
-    const extras = extrasTag ? parseConditional(extrasTag.value) : [];
+    // Conditions for every vehicle (maxspeed:conditional) apply next to those for this
+    // vehicle (maxspeed:hgv:conditional). One that names exactly this vehicle
+    // ("80 @ (trailer)", also in maxspeed:motorcar:conditional) is no condition for it
+    // but its own value.
+    const conditionalKeys = keysFor(vehicleSuffixes, direction, ':conditional');
+    const extrasTag = firstTag(tags, conditionalKeys);
+    const generalTag = firstTag(tags, conditionalKeys.filter((k) => !vehicleOf(k)));
+    /** @type {{ extra: ExtraLimit, tag: { key: string, value: string } }[]} */
+    const tagged = [extrasTag, generalTag?.key !== extrasTag?.key ? generalTag : null]
+      .flatMap((tag) => (tag ? parseConditional(tag.value).map((extra) => ({ extra, tag })) : []))
+      // The same entry in both (60 @ (weight>7.5)) is one sign.
+      .filter(({ extra }, i, all) => all.findIndex((o) => o.extra.kmh === extra.kmh && o.extra.raw === extra.raw) === i);
+    const isOwn = (/** @type {ExtraLimit} */ extra) => vehicleSuffixes.includes(extra.raw.toLowerCase());
+    /** For a truck class: true = met by every truck of it, false = by none, null = open. @param {ExtraLimit} extra */
+    const met = (extra) => (weight ? weightConditionMet(extra.raw, weight, vehicleSuffixes) : null);
+    const open = tagged.filter(({ extra }) => !isOwn(extra) && met(extra) === null);
+    const extras = open.map(({ extra }) => extra);
+    const ownConditional = tagged.filter(({ extra }) => isOwn(extra)).sort((a, b) => a.extra.kmh - b.extra.kmh)[0];
+    const lowestMet = tagged.filter(({ extra }) => !isOwn(extra) && met(extra) === true).sort((a, b) => a.extra.kmh - b.extra.kmh)[0];
 
     // Per-lane values. On two-way roads plain maxspeed:lanes lists the lanes of both
     // directions together, so only :lanes:forward / :lanes:backward are used there.
@@ -567,6 +662,27 @@
     const valueTag = firstTag(tags, keysFor(vehicleSuffixes, direction, ''));
     let value = valueTag ? parseSpeed(valueTag.value) : null;
     let source = valueTag ? `${valueTag.key}=${valueTag.value}` : '';
+    let vehicle = valueTag ? vehicleOf(valueTag.key) : '';
+    // "80 @ (trailer)" counts like maxspeed:trailer=80: before plain maxspeed and
+    // before the vehicles tried after trailer (caravan, motorcar).
+    /** @param {string} v */
+    const rank = (v) => (v ? vehicleSuffixes.indexOf(v) : vehicleSuffixes.length);
+    const ownVehicle = ownConditional ? ownConditional.extra.raw.toLowerCase() : '';
+    if (ownConditional && (!value || rank(ownVehicle) < rank(vehicle))) {
+      const kmh = ownConditional.extra.kmh;
+      value = { kind: kmh === WALK_KMH ? 'walk' : 'limit', kmh, implicit: false, raw: String(kmh) };
+      source = `${ownConditional.tag.key}=${ownConditional.tag.value}`;
+      vehicle = ownVehicle;
+    }
+    // A weight condition every truck of the chosen class meets ("60 @ (weightrating>7.5)"
+    // for class C) applies on top: the lower value wins.
+    if (lowestMet && (!value || value.kind === 'none' || (value.kind !== 'variable' && lowestMet.extra.kmh < value.kmh))) {
+      const kmh = lowestMet.extra.kmh;
+      value = { kind: kmh === WALK_KMH ? 'walk' : 'limit', kmh, implicit: false, raw: String(kmh) };
+      source = `${lowestMet.tag.key}=${lowestMet.tag.value}`;
+      vehicle = vehicleOf(lowestMet.tag.key) || vehicleSuffixes[0];
+    }
+    if (!value) vehicle = '';
     if (!value) {
       // Implicit limit from the type of area, if maxspeed itself is missing.
       const typeTag = firstTag(tags, ['zone:maxspeed', 'maxspeed:type', 'source:maxspeed']);
@@ -607,7 +723,7 @@
         // speed is tagged when it applies, so an untagged 130 there is only assumed.
         ...base, status: 'limit', ...shownSpeed(value, advisoryKmh),
         implicit: value.implicit || (value.kind === 'none' && !advisoryKmh && !/^motorway(_link)?$/.test(tags.highway || '')),
-        unlimited: value.kind === 'none', source, extras, lanes, symbol, variable,
+        unlimited: value.kind === 'none', source, vehicle, extras, lanes, symbol, variable,
       };
       // A bicycle road is closed to other vehicles by default (vehicle=no). Once they
       // are let in (vehicle, motor_vehicle or motorcar other than "no"), maxspeed
@@ -623,14 +739,17 @@
     if (lanes) {
       // Only per-lane values: the lowest one stands for the whole direction.
       const lowest = lanes.reduce((a, b) => (b.kmh < a.kmh ? b : a));
-      return { ...base, status: 'limit', ...lowest, source: `${lanesTag?.key}=${lanesTag?.value}`, extras, lanes };
+      return { ...base, status: 'limit', ...lowest, source: `${lanesTag?.key}=${lanesTag?.value}`, vehicle: vehicleOf(lanesTag?.key || ''), extras, lanes };
     }
     if (advisoryKmh) return { ...base, status: 'limit', kmh: advisoryKmh, advisory: true, source: `${advisoryTag?.key}=${advisoryTag?.value}`, extras };
     if (extras.length) {
       // Only conditional limits: the lowest becomes the main sign, the rest extra signs.
-      const [first, ...rest] = [...extras].sort((a, b) => a.kmh - b.kmh);
-      const { kmh, ...condition } = first;
-      return { ...base, status: 'limit', kmh, source: `${extrasTag?.key}=${extrasTag?.value}`, condition, extras: rest };
+      const sorted = [...open].sort((a, b) => a.extra.kmh - b.extra.kmh);
+      const { kmh, ...condition } = sorted[0].extra;
+      return {
+        ...base, status: 'limit', kmh, source: `${sorted[0].tag.key}=${sorted[0].tag.value}`, vehicle: vehicleOf(sorted[0].tag.key),
+        condition, extras: sorted.slice(1).map(({ extra }) => extra),
+      };
     }
 
     const isNoSpeedType = noSpeedRules.some(([key, v]) => tags[key] === v);
@@ -674,12 +793,22 @@
    * @param {string[]} vehicleSuffixes
    * @param {string | null} [country]  e.g. "DE"; "" = not known (zone:traffic may
    *                                   still name it); null = no defaults.
+   * @param {WeightRange | null} [weight]  Truck class, see directionSpeed.
    */
-  function waySpeed(tags, vehicleSuffixes, country = null) {
+  function waySpeed(tags, vehicleSuffixes, country = null, weight = null) {
     const oneway = onewayOf(tags);
-    const forward = oneway === -1 ? null : directionSpeed(tags, vehicleSuffixes, 'forward', oneway);
-    const backward = oneway === 1 ? null : directionSpeed(tags, vehicleSuffixes, 'backward', oneway);
-    if (country !== null && (forward?.status === 'missing' || backward?.status === 'missing')) {
+    const speeds = {
+      forward: oneway === -1 ? null : directionSpeed(tags, vehicleSuffixes, 'forward', oneway, weight),
+      backward: oneway === 1 ? null : directionSpeed(tags, vehicleSuffixes, 'backward', oneway, weight),
+    };
+    const isCar = vehicleSuffixes.every((v) => v === 'motorcar');
+    // For other vehicles a value for every vehicle (maxspeed=100) may be above what the
+    // law allows them anyway (trucks 80): then it says nothing for this vehicle.
+    // maxspeed:motorcar is such a value for a car with a trailer.
+    /** @param {DirectionSpeed | null} info */
+    const isGeneral = (info) => !isCar && info?.status === 'limit' && (!info.vehicle || info.vehicle === 'motorcar');
+    const directions = /** @type {const} */ (['forward', 'backward']);
+    if (country !== null && directions.some((d) => speeds[d]?.status === 'missing' || isGeneral(speeds[d]))) {
       const road = defaultRoad(country, tags);
       if (road) {
         const merged = { ...tags, ...defaultTagsFor(road.tags, tags) };
@@ -687,24 +816,49 @@
         // ("80 @ (weightrating>3.5)"); in the car view they are left out. Tagged
         // conditions stay: they stand for real supplementary panels.
         const tableConditional = merged['maxspeed:conditional'];
-        if (!vehicleSuffixes.length && tableConditional && !tags['maxspeed:conditional']) {
+        if (isCar && tableConditional && !tags['maxspeed:conditional']) {
           const forCars = splitConditional(tableConditional).filter((part) => !isOnlyForHeavierThanCar(part));
           if (forCars.length) merged['maxspeed:conditional'] = forCars.join('; ');
           else delete merged['maxspeed:conditional'];
         }
         // The table gives truck limits also for all goods vehicles (maxspeed:goods).
         const suffixes = vehicleSuffixes.includes('hgv') ? [...vehicleSuffixes, 'goods'] : vehicleSuffixes;
-        for (const [info, direction] of /** @type {const} */ ([[forward, 'forward'], [backward, 'backward']])) {
-          if (info?.status !== 'missing' || info.fallback) continue;
-          const def = directionSpeed(merged, suffixes, direction, oneway);
-          if (def?.status !== 'limit') continue;
-          // A conditional default not below the main one says nothing new (80 next to 80).
-          def.extras = def.extras.filter((extra) => extra.kmh < def.kmh);
-          info.fallback = { info: def, country: road.country, roadType: road.roadType };
+        // The vehicle's own default, as if no maxspeed were tagged at all.
+        const bare = Object.fromEntries(Object.entries(tags).filter(([k]) => k !== 'maxspeed' && !k.startsWith('maxspeed:')));
+        const ownDefaults = { ...bare, ...defaultTagsFor(road.tags, bare) };
+        for (const direction of directions) {
+          const info = speeds[direction];
+          if (info?.status === 'missing' && !info.fallback) {
+            const def = directionSpeed(merged, suffixes, direction, oneway, weight);
+            if (def?.status !== 'limit') continue;
+            // A conditional default not below the main one says nothing new (80 next to 80).
+            def.extras = def.extras.filter((extra) => extra.kmh < def.kmh);
+            info.fallback = { info: def, country: road.country, roadType: road.roadType };
+          } else if (info && isGeneral(info)) {
+            const def = directionSpeed(ownDefaults, suffixes, direction, oneway, weight);
+            if (def?.status !== 'limit') continue;
+            // Only a default of the vehicle's own (maxspeed:hgv), not the one for every
+            // vehicle: maxspeed=70 in town is above the 50 there but allowed for trucks.
+            if (!def.vehicle || def.vehicle === 'motorcar' || def.kmh >= info.kmh - 0.1) {
+              // The tagged value applies, but the law's lower limits for part of the
+              // vehicles still do (a 70 sign does not lift "60 over 7.5 t"): grey extras.
+              const lower = def.extras.filter((extra) => extra.kmh < info.kmh - 0.1
+                && !info.extras.some((own) => own.kmh === extra.kmh && own.raw === extra.raw));
+              info.extras = [...info.extras, ...lower.map((extra) => ({ ...extra, fromDefault: true }))];
+              continue;
+            }
+            // Tagged conditions below the default still apply (60 @ wet).
+            def.extras = [...info.extras, ...def.extras].filter((extra) => extra.kmh < def.kmh);
+            speeds[direction] = {
+              ...info, status: 'missing', kmh: 0, advisory: false, implicit: false, unlimited: false, variable: false,
+              sign: '', symbol: '', source: '', vehicle: '', condition: null, extras: [], lanes: null,
+              fallback: { info: def, country: road.country, roadType: road.roadType, above: info.source.split('\n')[0] },
+            };
+          }
         }
       }
     }
-    return { oneway, forward, backward, restricted: isAccessRestricted(tags) };
+    return { oneway, ...speeds, restricted: isAccessRestricted(tags) };
   }
 
   // ===========================================================================
@@ -1242,10 +1396,11 @@
    * @param {Tags} tags
    * @param {string[]} vehicleSuffixes  See OMC_VEHICLES, e.g. ["hgv"]; [] for cars.
    * @param {string | null} [country]  For the legal defaults, see waySpeed.
+   * @param {WeightRange | null} [weight]  Truck class, see directionSpeed.
    * @returns {LineStyle | null}
    */
-  function lineStyleFor(tags, vehicleSuffixes, country = null) {
-    const { forward, backward, restricted } = waySpeed(tags, vehicleSuffixes, country);
+  function lineStyleFor(tags, vehicleSuffixes, country = null, weight = null) {
+    const { forward, backward, restricted } = waySpeed(tags, vehicleSuffixes, country, weight);
     /** @type {Stripe[]} */
     let stripes;
     /** @type {SignSpot[]} */
@@ -1321,7 +1476,7 @@
     try { country = new Intl.DisplayNames([LANG], { type: 'region' }).of(fallback.country) || country; } catch { /* e.g. GB-SCT */ }
     return [
       signTooltip(fallback.info).split('\n')[0],
-      t.defaultValue,
+      fallback.above ? t.aboveDefault(fallback.above) : t.defaultValue,
       t.defaultRoad(country, fallback.roadType),
       t.defaultSource,
     ].join('\n');
@@ -1416,8 +1571,7 @@
       const weight = lower.match(/^(?:max)?weight(?:rating)?\s*>\s*(\d+(?:\.\d+)?)$/);
       if (lower === 'wet') panels.push({ art: '1053-35', lines: [] });
       else if (/^(snow|ice|icy)$/.test(lower)) panels.push({ art: 'snow', lines: [] });
-      else if (lower === 'fog') panels.push({ art: '', lines: [words.fog] });
-      else if (lower === 'hgv' || lower === 'goods') panels.push({ art: '1010-51', lines: [] });
+      else if (lower === 'fog') panels.push({ art: '', lines: [words.fog] });      else if (lower === 'hgv' || lower === 'goods') panels.push({ art: '1010-51', lines: [] });
       else if (lower === 'trailer' || lower === 'caravan') panels.push({ art: '1010-59', lines: [] });
       else if (lower === 'bus' || lower === 'coach') panels.push({ art: '1010-57', lines: [] });
       else if (lower === 'school') panels.push({ art: '1012-50', lines: [] });
@@ -1440,10 +1594,8 @@
    * @returns {Panel[]}
    */
   function vehiclePanels(info) {
-    const m = info.source.match(/^maxspeed:(hgv|bus|coach|trailer|caravan)\b/);
-    if (!m) return [];
-    const art = { hgv: '1010-51', bus: '1010-57', coach: '1010-57', trailer: '1010-59', caravan: '1010-59' }[/** @type {'hgv'} */ (m[1])];
-    return [{ art, lines: [] }];
+    const art = /** @type {Record<string, string>} */ ({ hgv: '1010-51', goods: '1010-51', bus: '1010-57', coach: '1010-57', trailer: '1010-59', caravan: '1010-59' })[info.vehicle];
+    return art ? [{ art, lines: [] }] : [];
   }
 
   /**
@@ -1467,7 +1619,7 @@
     module.exports = {
       parseSpeed, parseConditional, directionSpeed, waySpeed, onewayOf, lineStyleFor, signLabel, signTooltip,
       compileTagFilter, defaultRoad, defaultTagsFor, defaultTooltip, defaultSpeeds, isGreySign,
-      conditionPanels, mainPanels, variablePanels,
+      conditionPanels, mainPanels, variablePanels, weightConditionMet, weightOf, setHgvClasses,
       setDisplay, setNoSpeedRules, setExtraTypes, setVehicles, suffixesFor, checkSettings, bandFor, bandLabel, colorBands, shown,
     };
     return;
@@ -1503,6 +1655,7 @@
     setNoSpeedRules(msg.noSpeed);
     setExtraTypes(msg.extraTypes);
     setVehicles(msg.vehicles);
+    setHgvClasses(msg.hgvClasses);
     setDisplay(settings);
     onSettingsChanged();
   });
@@ -1568,7 +1721,7 @@
     function styleOf(tags, country) {
       let cached = styleByTags.get(tags);
       if (!cached || cached.country !== country) {
-        cached = { country, style: lineStyleFor(tags, suffixesFor(settings.vehicle), country) };
+        cached = { country, style: lineStyleFor(tags, suffixesFor(settings.vehicle), country, weightOf(settings)) };
         styleByTags.set(tags, cached);
       }
       return cached.style;
@@ -2330,9 +2483,9 @@
                   kind: 'limit',
                   panels: conditionPanels(extra),
                   radius: EXTRA_SIGN_RADIUS,
-                  tooltip: `${shown(extra.kmh)} ${unitLabel()} ${extra.label}${extra.raw !== extra.label ? `\n${extra.raw}` : ''}${fallback ? `\n${text().defaultValue}` : ''}`,
+                  tooltip: `${shown(extra.kmh)} ${unitLabel()} ${extra.label}${extra.raw !== extra.label ? `\n${extra.raw}` : ''}${fallback || extra.fromDefault ? `\n${text().defaultValue}` : ''}`,
                   // Conditional limits are tagged as numbers; grey only if they come from the table.
-                  muted: !!fallback,
+                  muted: !!fallback || !!extra.fromDefault,
                 });
               }
               for (const spec of extraSpecs) {
@@ -2452,6 +2605,8 @@
       };
       const vehicle = vehicles.find(([key]) => key === settings.vehicle);
       addInfo(text().vehicleHeading, vehicle ? `${vehicle[2]} ${LANG === 'en' ? vehicle[4] : vehicle[3]}` : settings.vehicle);
+      const hgvClass = settings.vehicle === 'hgv' ? hgvClasses.find(([key]) => key === settings.hgvClass) : undefined;
+      if (hgvClass) addInfo(text().hgvClassHeading, LANG === 'en' ? hgvClass[4] : hgvClass[3]);
       addInfo(text().unitHeading, unitLabel());
 
       /** Section heading with a thin line above. @param {string} title */

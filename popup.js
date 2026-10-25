@@ -11,12 +11,14 @@ const POPUP_TEXT = {
   de: {
     enabled: 'Färbung', signs: 'Schilder', extras: 'Zusatzschilder (Nässe, Uhrzeit …)', types: 'Arten anzeigen',
     defaults: 'Standardwerte des Landes (grau)', legend: 'Legende auf der Karte', vehicle: 'Fahrzeug', unit: 'Einheit', lang: 'Sprache',
+    hgvClass: 'Klasse', noFilter: 'keine Filterung', groupDE: 'DE-Führerscheinklassen', groupEU: 'EU-Fahrzeugklassen',
     noSpeed: 'Ohne maxspeed nur weiß gestrichelt:',
     footer: 'Gilt sofort in allen offenen iD-Tabs.',
   },
   en: {
     enabled: 'Colouring', signs: 'Signs', extras: 'Extra signs (wet, times …)', types: 'Types shown',
     defaults: 'Country defaults (grey)', legend: 'Legend on map', vehicle: 'Vehicle', unit: 'Unit', lang: 'Language',
+    hgvClass: 'Class', noFilter: 'no filter', groupDE: 'German licence classes', groupEU: 'EU vehicle categories',
     noSpeed: 'Without maxspeed only white dashes:',
     footer: 'Applies at once to all open iD tabs.',
   },
@@ -90,6 +92,18 @@ function render(s) {
   select.replaceChildren(...OMC_VEHICLES.map(([key, , icon, de, en]) => new Option(`${icon} ${s.lang === 'en' ? en : de}`, key)));
   select.value = s.vehicle;
 
+  // Truck classes by weight, only offered for trucks.
+  byId('hgvClassRow', HTMLDivElement).hidden = s.vehicle !== 'hgv';
+  const classSelect = byId('hgvClass', HTMLSelectElement);
+  const groups = /** @type {const} */ (['DE', 'EU']).map((group) => {
+    const optgroup = document.createElement('optgroup');
+    optgroup.label = group === 'DE' ? words.groupDE : words.groupEU;
+    optgroup.append(...OMC_HGV_CLASSES.filter((c) => c[3] === group).map(([key, , , , de, en]) => new Option(s.lang === 'en' ? en : de, key)));
+    return optgroup;
+  });
+  classSelect.replaceChildren(new Option(words.noFilter, ''), ...groups);
+  classSelect.value = s.hgvClass;
+
   byId(`unit-${s.unit}`, HTMLInputElement).checked = true;
   byId(`lang-${s.lang}`, HTMLInputElement).checked = true;
 }
@@ -112,6 +126,8 @@ for (const key of SWITCHES) {
 }
 const vehicleSelect = byId('vehicle', HTMLSelectElement);
 vehicleSelect.addEventListener('change', () => save({ vehicle: vehicleSelect.value }));
+const classSelect = byId('hgvClass', HTMLSelectElement);
+classSelect.addEventListener('change', () => save({ hgvClass: classSelect.value }));
 for (const radio of /** @type {NodeListOf<HTMLInputElement>} */ (document.querySelectorAll('input[name=unit]'))) {
   radio.addEventListener('change', () => save({ unit: radio.value === 'mph' ? 'mph' : 'kmh' }));
 }
