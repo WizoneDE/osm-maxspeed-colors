@@ -3,7 +3,7 @@
 //
 //   node dev/build-signs.js
 //
-// The SVG files are German traffic signs from Wikimedia Commons, already optimised
+// The SVG files are traffic signs from Wikimedia Commons, already optimised
 // with svgo (ids prefixed per sign, numbers rounded to one decimal). Only the
 // viewBox and the inner markup are kept; content.js puts them into <symbol>s.
 const fs = require('fs');

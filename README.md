@@ -25,11 +25,15 @@ What you see on the map:
   other than motorways, and the country defaults (below). On motorways `maxspeed=none`
   shows the advisory 130 in colour: in Germany it is the rule itself, signed at the
   border, and not tagged per road. A living street (`highway=living_street`) is in colour even
-  without `maxspeed`: it means walking pace by itself, and walking pace has the colour of
-  “≤ 5”.
-- **Official German signs** where one sign says it all: 325.1 living street
-  (`highway=living_street` at walking pace), 242.1 pedestrian zone (`highway=pedestrian`),
-  274.1 30 zone and 274.1-20 20 zone (`zone:maxspeed=DE:30`, `maxspeed=DE:zone30` …). A
+  without `maxspeed`: it means the country's living-street speed by itself (walking pace in
+  Germany, with the colour of “≤ 5”; 20 in Switzerland and France).
+- **Official signs** where one sign says it all: 325.1 living street
+  (`highway=living_street` at walking pace; in Switzerland the Begegnungszone sign 2.59.5,
+  in France B52), 242.1 pedestrian zone (`highway=pedestrian`),
+  274.1 30 zone and 274.1-20 20 zone (`zone:maxspeed=DE:30`, `maxspeed=DE:zone30` …).
+  Zones in other countries (`maxspeed:type=CH:zone30`, `zone:maxspeed=PL:40` …) show that
+  country's zone sign where a public-domain one is available (AT, BE, CH, FR, IT, NL, NO,
+  PL, SI), otherwise the German sign for 20 and 30; mph zones (`GB:zone20`) show the number. A
   bicycle road (`bicycle_road=yes`, `cyclestreet=yes` or `source:maxspeed=DE:bicycle_road`)
   shows sign 244.1: grey without `maxspeed` (30 implied), in colour with `maxspeed=30`.
   With another speed it shows the speed or zone sign with 244.1 next to it (e.g. 20, or
@@ -39,14 +43,15 @@ What you see on the map:
 - **Supplementary panels ("Zusatzzeichen")** under the sign, as on real German signs:
   the official panels for wet (1053-35), 7.5 t (1053-33), trucks (1010-51), buses
   (1010-57), cars with trailer (1010-59), school (1012-50), the snow symbol, and panels
-  in the same style with text made from the condition, e.g. `Mo-Fr 07:00-17:00` →
-  „Mo–Fr / 7–17 h“, `sunset-sunrise` → „nachts“, `PH` → „an Feiertagen“. A value that
+  in the same style with text made from the condition, in the language chosen in the
+  popup, e.g. `Mo-Fr 07:00-17:00` → “Mo–Fr / 7–17 h”, `sunset-sunrise` → “at night”,
+  `PH` → “public holidays”. A value that
   only applies to the selected vehicle (e.g. `maxspeed:hgv`) gets that vehicle's panel.
 - **Extra signs** next to the main sign, each with its panels: conditional limits
   (`maxspeed:conditional`; which kinds are shown can be chosen in the popup) and
   electronic signs (`maxspeed:variable`). For the latter the main sign and the line show
   `maxspeed` as the usual maximum; the extra sign is a dark electronic sign with the
-  reasons as panels (`weather` → „Wetter“, `peak_traffic` → „Verkehrslage“,
+  reasons as panels (`weather` → “weather”, `peak_traffic` → “traffic”,
   `school_zone` → 1012-50 …). With `maxspeed=none` the main sign is the advisory 130 and
   the electronic sign shows sign 282 (end of all restrictions).
 - **Line patterns:** yellow dots on the band colour = advisory speed (`maxspeed=none` with
@@ -121,7 +126,9 @@ nothing is loaded or sent anywhere, and iD's data is not changed.
 The German traffic signs come from [Wikimedia Commons](https://commons.wikimedia.org/)
 (files named “Zeichen …, StVO …” and “Zusatzzeichen …”, linked from the German Wikipedia
 article *Bildtafel der Verkehrszeichen in der Bundesrepublik Deutschland seit 2017*). As
-official works they are in the public domain (§ 5 UrhG). They were optimised with svgo.
+official works they are in the public domain (§ 5 UrhG). The zone and living-street signs
+of other countries (files starting with the country code) also come from Wikimedia Commons
+and are marked public domain or CC0 there. They were optimised with svgo.
 
 ### Updating the country defaults (monthly)
 
@@ -157,7 +164,7 @@ project's reference implementation, without its fuzzy filters (guesses).
 
 ### License
 
-The code is released under the [MIT License](LICENSE). The German traffic sign artwork
+The code is released under the [MIT License](LICENSE). The traffic sign artwork
 (`dev/signs/` and the generated `SIGN_ART` block in `content.js`) is in the public domain
 and not covered by that license. The country defaults (the generated `defaultSpeedTable`
 block in `content.js`) come from the OSM wiki page
@@ -192,11 +199,16 @@ Was auf der Karte erscheint:
   130 farbig: In Deutschland gilt sie von sich aus, ist an der Grenze beschildert und wird
   nicht je Straße getaggt.
   Ein verkehrsberuhigter Bereich (`highway=living_street`) ist auch ohne `maxspeed`
-  farbig: Er bedeutet von sich aus Schrittgeschwindigkeit, und die hat die Farbe von „≤ 5“.
+  farbig: Er bedeutet von sich aus das Tempo des Landes dafür (in Deutschland
+  Schrittgeschwindigkeit mit der Farbe von „≤ 5“, in der Schweiz und Frankreich 20).
 - **Amtliche Verkehrszeichen**, wo ein Zeichen alles sagt: 325.1 verkehrsberuhigter
-  Bereich (`highway=living_street` mit Schrittgeschwindigkeit), 242.1 Fußgängerzone
+  Bereich (`highway=living_street` mit Schrittgeschwindigkeit; in der Schweiz das Signal
+  2.59.5 Begegnungszone, in Frankreich B52), 242.1 Fußgängerzone
   (`highway=pedestrian`), 274.1 Tempo-30-Zone und 274.1-20 Tempo-20-Zone
-  (`zone:maxspeed=DE:30`, `maxspeed=DE:zone30` …). Eine Fahrradstraße (`bicycle_road=yes`,
+  (`zone:maxspeed=DE:30`, `maxspeed=DE:zone30` …). Zonen anderer Länder
+  (`maxspeed:type=CH:zone30`, `zone:maxspeed=PL:40` …) zeigen das Zonenzeichen des Landes,
+  wo ein gemeinfreies vorliegt (AT, BE, CH, FR, IT, NL, NO, PL, SI), sonst das deutsche für
+  20 und 30; mph-Zonen (`GB:zone20`) zeigen die Zahl. Eine Fahrradstraße (`bicycle_road=yes`,
   `cyclestreet=yes` oder `source:maxspeed=DE:bicycle_road`) zeigt Zeichen 244.1: grau ohne
   `maxspeed` (30 gilt implizit), farbig mit `maxspeed=30`. Bei anderem Tempo zeigt sie das
   Tempo- bzw. Zonen-Zeichen und 244.1 daneben (z. B. 20, oder 274.1-20 mit
@@ -207,7 +219,8 @@ Was auf der Karte erscheint:
 - **Zusatzzeichen** unter dem Schild wie in echt: die amtlichen Tafeln für Nässe
   (1053-35), 7,5 t (1053-33), Lkw (1010-51), Bus (1010-57), Pkw mit Anhänger (1010-59),
   Schule (1012-50), das Sinnbild Schnee- oder Eisglätte, und Tafeln im selben Stil mit
-  Text aus der Bedingung, z. B. `Mo-Fr 07:00-17:00` → „Mo–Fr / 7–17 h“,
+  Text aus der Bedingung in der im Popup gewählten Sprache, z. B.
+  `Mo-Fr 07:00-17:00` → „Mo–Fr / 7–17 h“,
   `sunset-sunrise` → „nachts“, `PH` → „an Feiertagen“. Gilt ein Wert nur für das gewählte
   Fahrzeug (z. B. `maxspeed:hgv`), bekommt das Schild dessen Tafel.
 - **Zusatzschilder** neben dem Hauptschild, jeweils mit ihren Tafeln: bedingte Limits

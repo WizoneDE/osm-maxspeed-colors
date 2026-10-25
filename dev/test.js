@@ -259,6 +259,21 @@ eq('Fahrradstraßen aus OSM', OSM.map((t) => BR(t)), ['limit 30 244.1 farbig', '
 eq('Fahrradstraße freigegeben: Linie „fehlt“', api.lineStyleFor({ highway: 'cycleway', bicycle_road: 'yes', motor_vehicle: 'yes' }, [], 'DE').stripes[0].look.color, '#e53935');
 eq('Zone 20', [{ maxspeed: '20', 'source:maxspeed': 'DE:zone20', 'zone:maxspeed': 'DE:20' }, { 'source:maxspeed': 'DE:zone20' }, { 'zone:maxspeed': 'DE:20' },
   { 'source:maxspeed': 'DE:zone20', 'zone:maxspeed': 'DE:20' }].map(ZONE), ['20 274.1-20 farbig', '20 274.1-20 grau', '20 274.1-20 grau', '20 274.1-20 grau']);
+// Zonen anderer Länder (2026-10-25): maxspeed:type=CH:zone30 ist in CH die übliche Form, nicht veraltet.
+// Eigenes gemeinfreies Zeichen je Land, sonst das deutsche für 20/30; mph-Zonen (GB) ohne Zeichen.
+const ZC = (tags, country = 'CH') => { const d = api.waySpeed({ highway: 'residential', ...tags }, [], country).forward; return [Math.round(d.kmh), d.symbol, api.isGreySign(d) ? 'grau' : 'farbig'].join(' '); };
+eq('Zone CH', [{ maxspeed: '30', 'maxspeed:type': 'CH:zone30' }, { 'maxspeed:type': 'CH:zone30' }, { maxspeed: '30', 'zone:maxspeed': 'CH:30' }, { maxspeed: '30', 'source:maxspeed': 'CH:zone:30' },
+  { maxspeed: '20', 'maxspeed:type': 'CH:zone20' }, { maxspeed: '50', 'maxspeed:type': 'CH:zone50' }, { maxspeed: '40', 'maxspeed:type': 'CH:zone30' }].map((t) => ZC(t)),
+  ['30 CH-2.59.1 farbig', '30 CH-2.59.1 grau', '30 CH-2.59.1 farbig', '30 CH-2.59.1 farbig', '20 CH-2.59.5 farbig', '50  farbig', '40  farbig']);
+eq('Zone andere Länder', [[{ maxspeed: '30', 'maxspeed:type': 'AT:zone30' }, 'AT'], [{ maxspeed: '40', 'source:maxspeed': 'PL:zone40' }, 'PL'], [{ maxspeed: '60', 'zone:maxspeed': 'NL:60' }, 'NL'],
+  [{ maxspeed: '30', 'source:maxspeed': 'BE-VLG:zone30' }, 'BE'], [{ maxspeed: '30', 'zone:maxspeed': 'FR:30' }, 'FR'], [{ maxspeed: '20', 'zone:maxspeed': 'FR:20' }, 'FR'],
+  [{ maxspeed: '30', 'maxspeed:type': 'CZ:zone30' }, 'CZ'], [{ maxspeed: '40', 'maxspeed:type': 'AT:zone40' }, 'AT'], [{ maxspeed: '20 mph', 'maxspeed:type': 'GB:zone20' }, 'GB'], [{ 'maxspeed:type': 'GB:zone20' }, 'GB']].map(([t, c]) => ZC(t, c)),
+  ['30 AT-11a farbig', '40 PL-B-43-40 farbig', '60 NL-A1-60-ZB farbig', '30 BE-F4a farbig', '30 274.1 farbig', '20 FR-B52 farbig', '30 274.1 farbig', '40  farbig', '32  farbig', '32  grau']);
+// Begegnungszone: highway=living_street ist in CH 20 (Signal 2.59.5), in DE/AT Schrittgeschwindigkeit (325.1)
+const LS = (tags, country) => { const d = api.waySpeed({ highway: 'living_street', ...tags }, [], country).forward; return [d.status, d.kmh, d.symbol, api.isGreySign(d) ? 'grau' : 'farbig'].join(' '); };
+eq('living_street je Land', [LS({}, 'CH'), LS({ maxspeed: '20' }, 'CH'), LS({ maxspeed: '10' }, 'CH'), LS({}, 'DE'), LS({}, 'AT'), LS({}, ''), LS({}, 'FR'), LS({}, 'NL')],
+  ['limit 20 CH-2.59.5 farbig', 'limit 20 CH-2.59.5 farbig', 'limit 10  farbig', 'limit 5 325.1 farbig', 'limit 5 325.1 farbig', 'limit 5 325.1 farbig', 'limit 20 FR-B52 farbig', 'limit 15  farbig']);
+eq('Begegnungszone Tooltip', api.signTooltip(api.waySpeed({ highway: 'living_street' }, [], 'CH').forward).split('\n')[0], 'Begegnungszone (Schweizer Signal 2.59.5): 20 km/h');
 eq('Linie bleibt „fehlt“', JSON.stringify(api.lineStyleFor({ highway: 'primary', ...RURAL }, [], 'DE').stripes) === JSON.stringify(api.lineStyleFor({ highway: 'primary', ...RURAL }, []).stripes), true);
 // Zusatzbedingungen der Standardwerte: PKW ohne Gewichts-/Lkw-Bedingungen, keine Dopplung mit dem Hauptwert
 // (K 154, 2026-10-25: PKW zeigte 100 + 80 über 3,5 t + 60 über 7,5 t)
