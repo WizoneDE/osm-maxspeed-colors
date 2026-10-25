@@ -246,6 +246,12 @@ eq('Fahrradstraße freigegeben: Linie „fehlt“', api.lineStyleFor({ highway: 
 eq('Zone 20', [{ maxspeed: '20', 'source:maxspeed': 'DE:zone20', 'zone:maxspeed': 'DE:20' }, { 'source:maxspeed': 'DE:zone20' }, { 'zone:maxspeed': 'DE:20' },
   { 'source:maxspeed': 'DE:zone20', 'zone:maxspeed': 'DE:20' }].map(ZONE), ['20 274.1-20 farbig', '20 274.1-20 grau', '20 274.1-20 grau', '20 274.1-20 grau']);
 eq('Linie bleibt „fehlt“', JSON.stringify(api.lineStyleFor({ highway: 'primary', ...RURAL }, [], 'DE').stripes) === JSON.stringify(api.lineStyleFor({ highway: 'primary', ...RURAL }, []).stripes), true);
+// Zusatzbedingungen der Standardwerte: PKW ohne Gewichts-/Lkw-Bedingungen, keine Dopplung mit dem Hauptwert
+// (K 154, 2026-10-25: PKW zeigte 100 + 80 über 3,5 t + 60 über 7,5 t)
+const EXTRAS = (veh) => { const d = api.waySpeed({ highway: 'tertiary', lanes: '2', ref: 'K 154', ...RURAL }, veh, 'DE').forward.fallback.info; return [d.kmh, ...d.extras.map((e) => `${e.kmh}@${e.raw}`)].join(' '); };
+eq('Standardwert-Bedingungen je Fahrzeug', [[], ['hgv'], ['bus', 'coach'], ['trailer', 'caravan']].map(EXTRAS),
+  ['100', '80 60@weightrating>7.5', '80 60@weightrating>7.5 60@trailer', '80 60@weightrating>7.5']);
+eq('getaggte Bedingung bleibt beim PKW', api.waySpeed({ highway: 'tertiary', maxspeed: '100', 'maxspeed:conditional': '60 @ (weight>7.5)' }, [], 'DE').forward.extras.length, 1);
 }
 
 console.log(fail ? `${fail} Tests fehlgeschlagen` : 'Alle Tests bestanden');

@@ -683,12 +683,24 @@
       const road = defaultRoad(country, tags);
       if (road) {
         const merged = { ...tags, ...defaultTagsFor(road.tags, tags) };
+        // The table's conditions for all vehicles include ones no car can meet
+        // ("80 @ (weightrating>3.5)"); in the car view they are left out. Tagged
+        // conditions stay: they stand for real supplementary panels.
+        const tableConditional = merged['maxspeed:conditional'];
+        if (!vehicleSuffixes.length && tableConditional && !tags['maxspeed:conditional']) {
+          const forCars = splitConditional(tableConditional).filter((part) => !isOnlyForHeavierThanCar(part));
+          if (forCars.length) merged['maxspeed:conditional'] = forCars.join('; ');
+          else delete merged['maxspeed:conditional'];
+        }
         // The table gives truck limits also for all goods vehicles (maxspeed:goods).
         const suffixes = vehicleSuffixes.includes('hgv') ? [...vehicleSuffixes, 'goods'] : vehicleSuffixes;
         for (const [info, direction] of /** @type {const} */ ([[forward, 'forward'], [backward, 'backward']])) {
           if (info?.status !== 'missing' || info.fallback) continue;
           const def = directionSpeed(merged, suffixes, direction, oneway);
-          if (def?.status === 'limit') info.fallback = { info: def, country: road.country, roadType: road.roadType };
+          if (def?.status !== 'limit') continue;
+          // A conditional default not below the main one says nothing new (80 next to 80).
+          def.extras = def.extras.filter((extra) => extra.kmh < def.kmh);
+          info.fallback = { info: def, country: road.country, roadType: road.roadType };
         }
       }
     }
@@ -941,6 +953,30 @@
     if (row) return { country: own, roadType: row[0], tags: row[1] };
     if (split < 0 || rows.some(([name]) => name && isUndecidable(name))) return null;
     return { country: own, roadType: '', tags: rows[split][1] };
+  }
+
+  /**
+   * Whether a conditional limit ("80 @ (weightrating>3.5 AND trailer)") only applies
+   * to vehicles a car (German class B: at most 3.5 t, 8 passenger seats, one trailer)
+   * can never be: more than 3.5 t, articulated, 10 or more seats, two trailers, or
+   * longer than 12 m. Times, weather or "trailer" can apply to cars and stay.
+   * @param {string} part  One entry of a conditional list.
+   */
+  function isOnlyForHeavierThanCar(part) {
+    const condition = part.split('@').slice(1).join('@').trim().replace(/^\((.*)\)$/, '$1');
+    return condition.split(/\s+AND\s+/i).some((term) => {
+      const t = term.trim().toLowerCase();
+      if (t === 'articulated') return true;
+      let m = /^weightrating\s*>=?\s*([\d.]+)\s*(t|lbs?|st)?$/.exec(t);
+      if (m) return Number(m[1]) * (m[2]?.startsWith('lb') ? 0.000453592 : m[2] === 'st' ? 0.907185 : 1) >= 3.5;
+      m = /^seats\s*>=?\s*(\d+)$/.exec(t);
+      if (m) return Number(m[1]) >= 10;
+      m = /^trailers\s*>=?\s*(\d+)$/.exec(t);
+      if (m) return Number(m[1]) >= 2;
+      m = /^length\s*>=?\s*([\d.]+)\s*(m|ft)?$/.exec(t);
+      if (m) return Number(m[1]) * (m[2] === 'ft' ? 0.3048 : 1) >= 12;
+      return false;
+    });
   }
 
   /** km/h of a plain number value, null for anything else (walk, none …). @param {string | undefined} value */
