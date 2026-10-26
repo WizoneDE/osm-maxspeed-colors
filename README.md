@@ -122,6 +122,7 @@ nothing is loaded or sent anywhere, and iD's data is not changed.
 | `dev/test.js` | Tests for the tag reading and line styles: `node dev/test.js`. Not needed to run the extension. |
 | `dev/signs/`, `dev/build-signs.js` | The official sign artwork and the script that writes it into `content.js` (`node dev/build-signs.js`). |
 | `dev/build-defaults.js` | Writes the country defaults into `content.js` and checks the wiki for changes (see below). |
+| `icons/`, `dev/icon/`, `dev/build-icons.js` | The toolbar and extension icon (a road with a speed limit sign, own drawing), its SVG sources and the script that renders the PNGs with headless Chrome (`node dev/build-icons.js`). |
 
 The German traffic signs come from [Wikimedia Commons](https://commons.wikimedia.org/)
 (files named “Zeichen …, StVO …” and “Zusatzzeichen …”, linked from the German Wikipedia
@@ -296,7 +297,9 @@ in allen offenen Tabs.
 iD hängt die Tags jedes Wegs an dessen SVG-Linie auf der Karte. Die Erweiterung liest sie
 dort; es wird nichts geladen oder verschickt, und iDs Daten bleiben unverändert.
 
-Die Dateien und ihre Aufgaben stehen in der Tabelle im englischen Teil oben.
+Die Dateien und ihre Aufgaben stehen in der Tabelle im englischen Teil oben. Das Icon
+(eine Straße mit Tempo-Schild, eigene Zeichnung) liegt als SVG in `dev/icon/`;
+`node dev/build-icons.js` rendert daraus mit headless Chrome die PNGs in `icons/`.
 
 ### Standardwerte aktualisieren (monatlich)
 
