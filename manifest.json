@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "__MSG_extName__",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "__MSG_extDescription__",
   "default_locale": "en",
   "permissions": ["storage"],
@@ -28,7 +28,7 @@
     },
     {
       "matches": ["https://www.openstreetmap.org/*", "https://openstreetmap.org/*"],
-      "js": ["content.js"],
+      "js": ["generated/signs.js", "generated/default-speeds.js", "content.js"],
       "all_frames": true,
       "run_at": "document_start",
       "world": "MAIN"

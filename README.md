@@ -115,13 +115,14 @@ nothing is loaded or sent anywhere, and iD's data is not changed.
 | File | Purpose |
 |---|---|
 | `content.js` | Runs inside the iD page: reads the tags, colours roads, draws signs and legend. |
+| `generated/` | Data written by the scripts in `dev/`, loaded just before `content.js`: the sign artwork (`signs.js`) and the country defaults (`default-speeds.js`). Not edited by hand. |
 | `bridge.js` | Passes the settings and the shared tables from Chrome's storage to `content.js`. |
 | `popup.html`, `popup.js` | The settings popup behind the toolbar icon. |
 | `settings.js` | Shared defaults, tables and the settings check, used by popup and bridge. `content.js` gets what it needs through the bridge, because Chrome does not share variables between page-world scripts. |
 | `_locales/` | Name and description in English and German. |
 | `dev/test.js` | Tests for the tag reading and line styles: `node dev/test.js`. Not needed to run the extension. |
-| `dev/signs/`, `dev/build-signs.js` | The official sign artwork and the script that writes it into `content.js` (`node dev/build-signs.js`). |
-| `dev/build-defaults.js` | Writes the country defaults into `content.js` and checks the wiki for changes (see below). |
+| `dev/signs/`, `dev/build-signs.js` | The official sign artwork and the script that writes it into `generated/signs.js` (`node dev/build-signs.js`). |
+| `dev/build-defaults.js` | Writes the country defaults into `generated/default-speeds.js` and checks the wiki for changes (see below). |
 | `icons/`, `dev/icon/`, `dev/build-icons.js` | The toolbar and extension icon (a road with a speed limit sign, own drawing), its SVG sources and the script that renders the PNGs with headless Chrome (`node dev/build-icons.js`). |
 
 The German traffic signs come from [Wikimedia Commons](https://commons.wikimedia.org/)
@@ -139,12 +140,12 @@ The wiki page *Default speed limits* is edited often. **Check it once a month:**
 node dev/build-defaults.js --check
 ```
 
-It compares the wiki revision stored in `content.js` with the current one. If the wiki
+It compares the wiki revision stored in `generated/default-speeds.js` with the current one. If the wiki
 is newer, generate the JSON with the parser of
 [osm-legal-default-speeds](https://github.com/westnordost/osm-legal-default-speeds)
 (`parser/main.py`, Python with `requests`, `beautifulsoup4`, `pycountry` and `lark`; the
 package `lark-parser` from its `requirements.txt` no longer runs on current Python) and
-write it into `content.js`:
+write it into `generated/default-speeds.js`:
 
 ```
 python parser/main.py legal_default_speeds.json
@@ -166,9 +167,9 @@ project's reference implementation, without its fuzzy filters (guesses).
 ### License
 
 The code is released under the [MIT License](LICENSE). The traffic sign artwork
-(`dev/signs/` and the generated `SIGN_ART` block in `content.js`) is in the public domain
-and not covered by that license. The country defaults (the generated `defaultSpeedTable`
-block in `content.js`) come from the OSM wiki page
+(`dev/signs/` and the generated `generated/signs.js`) is in the public domain
+and not covered by that license. The country defaults (the generated
+`generated/default-speeds.js`) come from the OSM wiki page
 [Default speed limits](https://wiki.openstreetmap.org/wiki/Default_speed_limits) by its
 contributors and are licensed
 [CC BY-SA 2.0](https://wiki.openstreetmap.org/wiki/Wiki_content_license).
@@ -316,9 +317,9 @@ Die Wiki-Seite *Default speed limits* wird oft geändert. **Einmal im Monat prü
 
 ### Lizenz
 
-Der Code steht unter der [MIT-Lizenz](LICENSE). Die Verkehrszeichen (`dev/signs/` und der
-erzeugte `SIGN_ART`-Block in `content.js`) sind gemeinfrei und fallen nicht unter diese Lizenz.
-Die Standardwerte der Länder (der erzeugte Block `defaultSpeedTable` in `content.js`)
+Der Code steht unter der [MIT-Lizenz](LICENSE). Die Verkehrszeichen (`dev/signs/` und die
+daraus erzeugte `generated/signs.js`) sind gemeinfrei und fallen nicht unter diese Lizenz.
+Die Standardwerte der Länder (die erzeugte `generated/default-speeds.js`)
 stammen von der OSM-Wiki-Seite
 [Default speed limits](https://wiki.openstreetmap.org/wiki/Default_speed_limits) und ihren
 Autoren und stehen unter
