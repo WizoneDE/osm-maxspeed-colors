@@ -162,6 +162,8 @@ project's reference implementation, without its fuzzy filters (guesses).
 1. Download the latest release (or *Code* → *Download ZIP*) and unpack it.
 2. Open `chrome://extensions` and switch on *Developer mode*.
 3. *Load unpacked* → choose the unpacked folder (the one containing `manifest.json`).
+   On Windows, *Extract All* creates a second folder of the same name inside the first;
+   choose the inner one, or Chrome reports that the manifest file is missing.
 4. Reload the iD editor.
 
 ### License
@@ -313,6 +315,8 @@ Die Wiki-Seite *Default speed limits* wird oft geändert. **Einmal im Monat prü
 1. Die neueste Version (Release, oder *Code* → *Download ZIP*) herunterladen und entpacken.
 2. `chrome://extensions` öffnen und den *Entwicklermodus* einschalten.
 3. *Entpackte Erweiterung laden* → den entpackten Ordner wählen (der mit `manifest.json`).
+   Unter Windows legt *Alle extrahieren* darin einen zweiten, gleichnamigen Ordner an;
+   den inneren wählen, sonst meldet Chrome, die Manifest-Datei fehle.
 4. Den iD-Editor neu laden.
 
 ### Lizenz
